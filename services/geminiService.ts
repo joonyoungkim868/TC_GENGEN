@@ -240,6 +240,7 @@ const callGeminiWithRetry = async (
 ): Promise<string> => {
     let apiAttempts = 0;
     const MAX_API_RETRIES = 3; 
+    let currentDelay = 3000; // Start with 3 seconds
 
     while (apiAttempts < MAX_API_RETRIES) {
         try {
@@ -269,7 +270,12 @@ const callGeminiWithRetry = async (
         } catch (error: any) {
             apiAttempts++;
             console.error(`Gemini Attempt ${apiAttempts} failed:`, error.message);
-            if (apiAttempts < MAX_API_RETRIES) await delay(3000);
+            
+            if (apiAttempts < MAX_API_RETRIES) {
+                console.log(`[Backoff] Retrying in ${currentDelay}ms...`);
+                await delay(currentDelay);
+                currentDelay = currentDelay * 2; // Exponential Backoff: 3000 -> 6000 -> 12000
+            }
         }
     }
     throw new Error("Failed to get response from Gemini");

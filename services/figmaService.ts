@@ -54,6 +54,7 @@ const PROXY_GENERATORS_API = [
 
 // Image Calls are signed URLs, no auth headers needed.
 const PROXY_GENERATORS_IMAGE = [
+    (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}`, // High stability proxy
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
