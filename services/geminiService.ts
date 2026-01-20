@@ -281,46 +281,59 @@ export const generateTestCases = async (
 ): Promise<{ testCases: TestCase[]; questions: string[]; summary: string }> => {
   const ai = getClient();
   
-  // UPDATED STRATEGY: Implemented "Universal Traversal Strategy" and "Matrix Permutation"
+  // UPDATED STRATEGY: 
+  // 1. Remove Chaos Monkey (Randomness)
+  // 2. Implement De-bundling (Atomic checks)
+  // 3. Implement Arithmetic Formula (N -> N+1)
   const PHASES = [
       { 
-          name: "1. UI/UX Inspection", 
+          name: "1. Visual Inspector (UI/UX)", 
           prompt: `
-            Focus strictly on visible UI elements.
-            - Check Labels, Placeholders, Icons, Colors, Fonts.
-            - Verify alignment and layout consistency.
+            **GOAL**: Detect visual anomalies.
+            - Scan for **Typos** in labels and guide texts.
+            - Verify **Placeholders** are present in empty fields.
+            - Check alignment of input boxes and buttons.
+            - Verify Icons match their labels.
           `
       },
       { 
-          name: "2. Functional Logic (Happy Path)", 
+          name: "2. Flow Navigator (Transitions)", 
           prompt: `
-            Focus on the main business logic and successful workflows.
-            - Verify navigation links.
-            - Verify successful form submissions.
-            - Verify screen transitions.
+            **GOAL**: Verify screen transitions.
+            - Do not just check the current screen. Check where the [Button] takes you.
+            - TC Structure: Step [Click Button] -> Expected [New Page Opens].
+            - Verify Breadcrumbs or Header Titles update correctly after transition.
           `
       },
       { 
-          name: "3. Input Validation (Negative Path)", 
+          name: "3. Field Iterator (Input Validation)", 
           prompt: `
-            Focus on constraints and error handling.
-            - Check Max/Min length, Required fields, Invalid formats.
-            - Check boundary values (Edge cases for numbers/dates).
+            **GOAL**: Exhaustive Input Testing (De-bundling).
+            - **LOOP**: For EVERY input field found (A, B, C...):
+              1. Generate TC: [Field A] - Empty value.
+              2. Generate TC: [Field A] - Invalid format (Special chars, etc).
+              3. Generate TC: [Field A] - Max length exceeded.
+            - **WARNING**: Do NOT group fields. "Check all inputs" is FORBIDDEN.
+            - **WARNING**: Do NOT generate just one generic "Input check". Generate 3 per field.
           `
       },
       { 
-          name: "4. State Dynamics & Arithmetic", 
+          name: "4. Logic Calculator (State & Arithmetic)", 
           prompt: `
-            1. **Counters**: Verify numbers increase (+1) / decrease (-1).
-            2. **Popups**: Verify [Confirm] executes action, [Cancel] closes popup without action.
-            3. **Lists**: Verify 0 items, 1 item, Many items behavior.
+            **GOAL**: Verify numeric changes and state updates.
+            - **FORMULA**: If a list item is added/removed, use formula: **[Before: N] -> [After: N+1]** or **[N-1]**.
+            - Explicitly mention the calculation in Expected Result. (e.g., "Count increases from 0 to 1").
+            - Verify Pagination (Page 1 -> Page 2).
+            - Verify Filters (Total 10 -> Filtered 3).
           `
       },
       { 
-          name: "5. Context-Aware Edge Cases", 
+          name: "5. Context-Based Stability (Retention)", 
           prompt: `
-            1. **Transaction Screens**: Test Network disconnect, Refresh, Back button during process.
-            2. **Static Screens**: Test simple layout stability on resize (if applicable).
+            **GOAL**: Verify data persistence and safe failures.
+            - Test **Browser Refresh (F5)**: Does the form data survive?
+            - Test **Back Button**: Can user return to previous state safely?
+            - **CONDITIONAL**: Only generate 'Network Disconnect' or 'Timeout' cases IF those specific keywords (e.g. "Network", "Timeout") appear in the document text. Otherwise, ignore.
           `
       }
   ];
@@ -395,7 +408,7 @@ export const generateTestCases = async (
       2. **Preconditions**: MUST be a numbered list describing STATE.
       3. **Steps**: End sentences with NOUNS (명사형) or IMPERATIVE. **DO NOT end with a period(.).**
       4. **Results**: Use PASSIVE VOICE (~된다).
-      5. **Atomicity**: One TC verifies exactly ONE thing.
+      5. **Atomicity**: One TC verifies exactly ONE thing. **NO BUNDLING.**
       
       Output ONLY valid JSON.
       Values MUST be in Korean.
