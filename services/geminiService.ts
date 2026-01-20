@@ -374,6 +374,12 @@ export const generateTestCases = async (
       
       Generate Test Cases starting from No.${currentStartNo}.
       
+      **QUANTITY REQUIREMENT (CRITICAL)**:
+      - This is a "Deep Dive" QA. **Do not summarize.**
+      - **GOAL:** Generate **at least 15~30 Test Cases** for this phase alone.
+      - If the UI is complex, generate even more.
+      - Expand every single variation (e.g., Checked/Unchecked, Active/Disabled, 1 item/Max items).
+      
       PHASE INSTRUCTION:
       ${currentPhase.prompt}
       
