@@ -27,11 +27,11 @@ const testCaseSchema: Schema = {
                     depth3: { type: Type.STRING },
                     precondition: { 
                         type: Type.STRING, 
-                        description: "List of states required BEFORE the test starts. MUST be a numbered list (1. Condition A\\n2. Condition B). Do NOT say 'None'." 
+                        description: "List of states required BEFORE the test starts. MUST be a numbered list (1. State A\\n2. State B). Do NOT say 'None'." 
                     },
                     steps: { 
                         type: Type.STRING, 
-                        description: "Detailed execution path. Start with Navigation path. Specify Input Data. Use numbered list." 
+                        description: "Detailed execution path. Start with Navigation path. Specify Input Data. Use numbered list. End with Noun (명사형)." 
                     },
                     actionReasoning: { 
                         type: Type.STRING, 
@@ -39,7 +39,7 @@ const testCaseSchema: Schema = {
                     },
                     expectedResult: { 
                         type: Type.STRING, 
-                        description: "Final UI outcome. ONE atomic check only. INFER standard behavior if missing. Do NOT say 'Not specified'." 
+                        description: "Final UI outcome. ONE atomic check only. Use Passive Voice (~된다). Do NOT say 'Check'." 
                     },
                 },
                 required: ["no", "title", "steps", "expectedResult"] // Enforce required fields
@@ -308,13 +308,28 @@ export const generateTestCases = async (
 ): Promise<{ testCases: TestCase[]; questions: string[]; summary: string }> => {
   const ai = getClient();
   
-  // STRATEGY: 5 Strict Phases to force deep coverage and permutation
-  const FOCUS_AREAS = [
-      "Phase 1: [UI INSPECTION] Exhaustively test every visible clickable element (Buttons, Links, Tabs, Icons). One TC per element.",
-      "Phase 2: [BOUNDARY & VALIDATION] Check Max/Min lengths, Special characters, and Empty inputs for ALL input fields.",
-      "Phase 3: [VISUAL PERMUTATION] Create Truth Tables for all combinations of inputs (e.g., Checkbox A + Checkbox B). Test ALL combinations (O/O, O/X, X/O, X/X).",
-      "Phase 4: [WORKFLOW STATE] Step-by-step process flows (Start -> Finish). Verify status changes (e.g., Pending -> Active).",
-      "Phase 5: [NEGATIVE & EDGE] Interruption, Cancel buttons, Page refreshes during loading, Back navigation."
+  // UPDATED STRATEGY: Structured Phase Objects for distinct targeting
+  const PHASES = [
+      { 
+          name: "1. UI/UX Inspection", 
+          prompt: "Focus strictly on visible UI elements. Check for typos, button states (active/disabled), layout alignment, and text visibility. Do not imagine functionality yet, just check the interface." 
+      },
+      { 
+          name: "2. Functional Logic (Happy Path)", 
+          prompt: "Focus on the main business logic and successful user flows. What is the primary goal of this page? (e.g., Successful Registration, Successful Search). Write Positive Test Cases." 
+      },
+      { 
+          name: "3. Input Validation", 
+          prompt: "Focus on input fields. Check Max/Min lengths, Special characters, Empty fields, and Invalid formats (e.g., Email without @). Verify error messages." 
+      },
+      { 
+          name: "4. Visual Combinations", 
+          prompt: "Look for multiple filters, checkboxes, or dropdowns. Create 'Truth Tables' for combinations (e.g., Filter A(On) + Filter B(Off)). Generate ALL logical permutations." 
+      },
+      { 
+          name: "5. Edge Cases & Negative", 
+          prompt: "Focus on negative scenarios: Network error, Back button during loading, Double clicking save buttons, Closing browser mid-process." 
+      }
   ];
 
   let accumulatedTestCases: TestCase[] = [];
@@ -346,24 +361,26 @@ export const generateTestCases = async (
   );
 
   // Loop through each Phase
-  for (let i = 0; i < FOCUS_AREAS.length; i++) {
-      const currentPhase = FOCUS_AREAS[i];
-      console.log(`[Gemini Loop] Starting ${currentPhase} - StartNo: ${currentStartNo}`);
+  for (let i = 0; i < PHASES.length; i++) {
+      const currentPhase = PHASES[i];
+      console.log(`[Gemini Loop] Starting ${currentPhase.name} - StartNo: ${currentStartNo}`);
 
-      // Removed "Aim for 10" limit.
-      // Explicitly requested ALL cases for the specific phase.
+      // Dynamic Phase Prompt Injection
       const loopPrompt = `
       --- COMMAND ---
-      CURRENT FOCUS: ${currentPhase}
+      CURRENT PHASE: ${currentPhase.name}
       
       Generate Test Cases starting from No.${currentStartNo}.
       
-      INSTRUCTION:
+      PHASE INSTRUCTION:
+      ${currentPhase.prompt}
+      
+      CRITICAL RULES:
       1. Analyze the document/image specifically for this Phase.
-      2. Generate **ALL** possible Test Cases that fit this phase's description. 
-      3. If there are many combinations (Phase 3), generate them ALL. Do not summarize.
-      4. Remember the "Atomic Rule": One TC = One Result.
-      5. **Preconditions**: MUST be a numbered list (1. State A\n2. State B).
+      2. Do not repeat TCs from previous phases (if any).
+      3. **Preconditions**: MUST be a numbered list describing STATE.
+      4. **Steps**: End sentences with NOUNS (명사형) or IMPERATIVE.
+      5. **Results**: Use PASSIVE VOICE (~된다).
       
       Output ONLY valid JSON.
       Values MUST be in Korean.
@@ -382,7 +399,6 @@ export const generateTestCases = async (
           
           try {
               const json = JSON.parse(cleanText);
-              // REMOVED faulty normalizeKeys. We use strict robust mapping in mapToTestCases now.
               const tcs = json.testCases || json.testcases || [];
               currentBatchTCs = mapToTestCases(tcs);
               currentBatchQuestions = json.questions || [];
@@ -478,10 +494,12 @@ export const updateTestCasesWithQA = async (
     Re-generate the COMPLETE list of Test Cases (starting from No.1).
     Update based on the Q&A provided.
     
-    CRITICAL:
-    - Maintain the "Visual Permutation" rule.
-    - Maintain the "Atomic Rule" (One Result per TC).
-    - **Preconditions**: MUST be a numbered list (1. ... \n2. ...).
+    CRITICAL RULES:
+    1. Maintain the "Visual Permutation" rule.
+    2. Maintain the "Atomic Rule" (One Result per TC).
+    3. **Preconditions**: MUST be a numbered list (1. ... \n2. ...).
+    4. **Steps**: End sentences with NOUNS (명사형) or IMPERATIVE.
+    5. **Results**: Use PASSIVE VOICE (~된다).
     
     Output ONLY valid JSON.
     Values MUST be in Korean.
@@ -504,7 +522,6 @@ export const updateTestCasesWithQA = async (
         const cleanText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
         try {
             const json = JSON.parse(cleanText);
-            // REMOVED faulty normalizeKeys
             const tcs = json.testCases || json.testcases || [];
             newTCs = mapToTestCases(tcs);
             newQuestions = json.questions || [];
