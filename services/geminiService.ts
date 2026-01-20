@@ -281,55 +281,46 @@ export const generateTestCases = async (
 ): Promise<{ testCases: TestCase[]; questions: string[]; summary: string }> => {
   const ai = getClient();
   
-  // UPDATED STRATEGY: Implemented "Arithmetic/Cardinality" and "Context-Aware Edge Cases"
+  // UPDATED STRATEGY: Implemented "Universal Traversal Strategy" and "Matrix Permutation"
   const PHASES = [
       { 
           name: "1. UI/UX Inspection", 
           prompt: `
             Focus strictly on visible UI elements.
-            **Rule of Atomicity**: Test every single element separately.
-            - "Check Logo visibility", "Check Text color", "Check Font size".
-            - Verify button states (active/disabled), alignment, and typos.
+            - Check Labels, Placeholders, Icons, Colors, Fonts.
+            - Verify alignment and layout consistency.
           `
       },
       { 
           name: "2. Functional Logic (Happy Path)", 
           prompt: `
-            Focus on the main business logic.
-            **Rule of Atomicity**: Split workflows into single steps.
-            - Do not say "Login". Say "1. Enter ID", "2. Enter PW", "3. Click Login".
-            - If it is a simple screen, check navigation links.
+            Focus on the main business logic and successful workflows.
+            - Verify navigation links.
+            - Verify successful form submissions.
+            - Verify screen transitions.
           `
       },
       { 
-          name: "3. Input Validation", 
+          name: "3. Input Validation (Negative Path)", 
           prompt: `
-            Focus on input fields (TextField, Checkbox, Radio).
-            - Max length, Min length, Special characters, Empty, Invalid format.
-            - If no inputs exist, verify that no unexpected keyboard appears.
+            Focus on constraints and error handling.
+            - Check Max/Min length, Required fields, Invalid formats.
+            - Check boundary values (Edge cases for numbers/dates).
           `
       },
       { 
           name: "4. State Dynamics & Arithmetic", 
           prompt: `
-            **CRITICAL PHASE: ARITHMETIC & CARDINALITY**
-            1. **Counters/Dashboards**: If numbers exist (e.g. "Total: 5"), generate TCs to verify they **increase (+1)** on addition and **decrease (-1)** on deletion. 
-            2. **Popups/Modals**: For EVERY confirmation popup, generate TWO separate TCs:
-               - Click **[Cancel]**: Verify popup closes and state remains Unchanged.
-               - Click **[Confirm]**: Verify action executes.
-            3. **Cardinality**: If a list exists, generate separate TCs for "Select 1 item" vs "Select 5 items" vs "Select All".
+            1. **Counters**: Verify numbers increase (+1) / decrease (-1).
+            2. **Popups**: Verify [Confirm] executes action, [Cancel] closes popup without action.
+            3. **Lists**: Verify 0 items, 1 item, Many items behavior.
           `
       },
       { 
           name: "5. Context-Aware Edge Cases", 
           prompt: `
-            **CRITICAL PHASE: CONTEXTUAL INTERRUPTION**
-            Analyze the screen context first.
-            - **IF** the screen implies a Transaction/Process (e.g. "Uploading...", "Saving...", "Searching...", "Matching..."):
-               - Generate TCs for: Network Disconnect *during* process, Browser Refresh *during* process, Back Button *during* process.
-               - Verification: Ensure data integrity or safe rollback.
-            - **IF** the screen is Static (e.g. Simple View, Terms):
-               - **SKIP** complex interruption tests. Only check basic layout stability.
+            1. **Transaction Screens**: Test Network disconnect, Refresh, Back button during process.
+            2. **Static Screens**: Test simple layout stability on resize (if applicable).
           `
       }
   ];
@@ -373,14 +364,30 @@ export const generateTestCases = async (
       CURRENT PHASE: ${currentPhase.name}
       
       Generate Test Cases starting from No.${currentStartNo}.
-      
-      **QUANTITY REQUIREMENT (CRITICAL)**:
-      - This is a "Deep Dive" QA. **Do not summarize.**
-      - **GOAL:** Generate **at least 15~30 Test Cases** for this phase alone.
-      - If the UI is complex, generate even more.
-      - Expand every single variation (e.g., Checked/Unchecked, Active/Disabled, 1 item/Max items).
-      
-      PHASE INSTRUCTION:
+
+      ### STRATEGY: CHAIN OF THOUGHT & TRAVERSAL (CRITICAL)
+
+      **Step 1: The "Virtual Finger" Simulation**
+      Before generating any TC, simulate a user's finger moving through the content.
+      - **IF IMAGE:** Scan strictly from **Top-Left ↘ Bottom-Right** (Z-Pattern).
+      - **IF TEXT:** Scan hierarchically: **[Section Title] ↘ [Subtitle] ↘ [Form Input] ↘ [Action Button]**.
+
+      **Step 2: The "Stop & Verify" Rule**
+      Do not rush to the submit button. Stop at **EVERY** element your virtual finger touches.
+      - **Found a Text Label?** -> Generate TC: "Check text visibility/typo".
+      - **Found an Input Field?** -> Generate TCs: "Valid input", "Empty input", "Max length", "Special chars".
+      - **Found a List?** -> Generate TCs: "1 item", "Multi items", "Empty list".
+      - **Found a Date Picker?** -> Generate TCs: "Past date", "Future date", "Start > End".
+
+      **Step 3: Matrix Permutation (Multi-Angle Verification)**
+      Do not generate just one case. Exploit the "State Matrix" for every found element:
+      - **Input Fields:** [Empty, Valid, Invalid Type, Max Length, Min Length]
+      - **Buttons:** [Active, Disabled, Hover, Double Click]
+      - **Checkboxes/Radios:** [Default, Selected, Unselected, Toggle]
+      - **Popups:** [Confirm, Cancel, Close(x), Outside Click]
+      - **Date/Time:** [Past, Future, Range(Start>End), Invalid Format]
+
+      PHASE INSTRUCTION (Focus Area):
       ${currentPhase.prompt}
       
       CRITICAL RULES:
