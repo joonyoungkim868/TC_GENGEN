@@ -12,6 +12,7 @@ const getClient = () => {
 };
 
 // Define the response schema for strict JSON generation
+// UPDATED: Removed 'actionReasoning' to save tokens and reduce latency.
 const testCaseSchema: Schema = {
     type: Type.OBJECT,
     properties: {
@@ -32,10 +33,6 @@ const testCaseSchema: Schema = {
                     steps: { 
                         type: Type.STRING, 
                         description: "Detailed execution path. Start with Navigation path. Specify Input Data. Use numbered list. End with Noun (명사형)." 
-                    },
-                    actionReasoning: { 
-                        type: Type.STRING, 
-                        description: "Logic/Reasoning for the expected result (Internal thought process)" 
                     },
                     expectedResult: { 
                         type: Type.STRING, 
@@ -86,13 +83,12 @@ const parseViaBrackets = (text: string, result: { testCases: any[], questions: s
                           // Direct mapping, no normalization here to preserve structure
                           // merging will happen in mapToTestCases
                           if (obj.no !== undefined && (obj.title || obj.steps)) {
-                              if (!result.testCases.some(tc => tc.no === obj.no)) {
-                                result.testCases.push(obj);
-                              }
+                              // REMOVED deduplication check here to allow re-indexing later
+                              result.testCases.push(obj);
                           } else if (Array.isArray(obj.testCases) || Array.isArray(obj.testcases)) {
                               const tcs = obj.testCases || obj.testcases;
                               tcs.forEach((tc: any) => {
-                                  if (tc.no !== undefined && !result.testCases.some(exist => exist.no === tc.no)) {
+                                  if (tc.no !== undefined) {
                                       result.testCases.push(tc);
                                   }
                               });
@@ -121,8 +117,8 @@ const parseViaRegex = (text: string, result: { testCases: any[] }) => {
       const chunk = match[0];
       const no = parseInt(match[1]);
       
-      if (result.testCases.some(tc => tc.no === no)) continue;
-
+      // Removed deduplication check here as well
+      
       const getField = (key: string) => {
         // Improved Regex:
         // Matches "key": "value"
@@ -166,7 +162,7 @@ const recoverTruncatedJson = (text: string): { testCases: any[], questions: stri
       parseViaRegex(cleanText, result);
   }
 
-  result.testCases.sort((a, b) => a.no - b.no);
+  // We don't sort here anymore, we sort at the very end
   return result;
 };
 
@@ -216,10 +212,11 @@ const postProcessTestCases = (testCases: TestCase[]): TestCase[] => {
         const d3b = (b.depth3 || "").trim();
         if (d3a !== d3b) return d3a.localeCompare(d3b, 'ko');
 
-        return a.no - b.no;
+        // Fallback to insertion order if depths are equal
+        return 0; 
     });
 
-    // Renumber sequentially
+    // Renumber sequentially starting from 1
     return sorted.map((tc, index) => ({
         ...tc,
         no: index + 1
@@ -273,8 +270,8 @@ const callGeminiWithRetry = async (
             const config: any = {
                 systemInstruction: baseSystemInstruction,
                 maxOutputTokens: 65536,
-                // Strategy 1: Lower Temperature to 0.2 for Consistency
-                temperature: 0.2, 
+                // UPDATED: Strategy 1: Temperature to 0.3 for balance between rigor and creativity
+                temperature: 0.3, 
                 responseMimeType: "application/json",
             };
 
@@ -308,27 +305,56 @@ export const generateTestCases = async (
 ): Promise<{ testCases: TestCase[]; questions: string[]; summary: string }> => {
   const ai = getClient();
   
-  // UPDATED STRATEGY: Structured Phase Objects for distinct targeting
+  // UPDATED STRATEGY: 
+  // 1. Prompts now include "Rule of Atomicity" to increase quantity without hallucinations.
+  // 2. Fallback logic included in prompt for simple screens.
   const PHASES = [
       { 
           name: "1. UI/UX Inspection", 
-          prompt: "Focus strictly on visible UI elements. Check for typos, button states (active/disabled), layout alignment, and text visibility. Do not imagine functionality yet, just check the interface." 
+          prompt: `
+            Focus strictly on visible UI elements.
+            **Rule of Atomicity**: Do not group checks. Test every single element separately.
+            - Example Bad: "Check logo and text." (1 TC)
+            - Example Good: "1. Check Logo visibility.", "2. Check Text color.", "3. Check Font size." (3 TCs)
+            Check for typos, button states (active/disabled), alignment, and visibility.
+          `
       },
       { 
           name: "2. Functional Logic (Happy Path)", 
-          prompt: "Focus on the main business logic and successful user flows. What is the primary goal of this page? (e.g., Successful Registration, Successful Search). Write Positive Test Cases." 
+          prompt: `
+            Focus on the main business logic and successful user flows.
+            **Rule of Atomicity**: Split workflows into single steps.
+            - Example Bad: "Enter ID/PW and Login." (1 TC)
+            - Example Good: "1. Enter ID only.", "2. Enter PW only.", "3. Click Login Button." (3 TCs)
+            If the screen is simple (e.g. Terms), focus on the 'Next' or 'Agree' button logic.
+          `
       },
       { 
           name: "3. Input Validation", 
-          prompt: "Focus on input fields. Check Max/Min lengths, Special characters, Empty fields, and Invalid formats (e.g., Email without @). Verify error messages." 
+          prompt: `
+            Focus on input fields (TextField, Checkbox, Radio).
+            **Rule of Atomicity**: Test one validation rule per TC.
+            - Max length, Min length, Special characters, Empty, Invalid format.
+            If no inputs exist, verify that no unexpected keyboard appears.
+          `
       },
       { 
           name: "4. Visual Combinations", 
-          prompt: "Look for multiple filters, checkboxes, or dropdowns. Create 'Truth Tables' for combinations (e.g., Filter A(On) + Filter B(Off)). Generate ALL logical permutations." 
+          prompt: `
+            Look for multiple filters, checkboxes, or dropdowns. 
+            **Rule of Atomicity**: Generate ONE Test Case for EACH combination.
+            (e.g., Filter A(On)+B(Off), A(Off)+B(On), A(On)+B(On)).
+            If simple, check visual states (Normal, Hover, Pressed, Disabled).
+          `
       },
       { 
           name: "5. Edge Cases & Negative", 
-          prompt: "Focus on negative scenarios: Network error, Back button during loading, Double clicking save buttons, Closing browser mid-process." 
+          prompt: `
+            Focus on failure scenarios.
+            **Rule of Atomicity**: Test one failure condition per TC.
+            - Network Error, Back button during loading, Double click, Force quit.
+            **Fallback**: If the screen is very simple, Generate at least 5 TCs for standard mobile interruptions (Home button, Screen rotation, etc).
+          `
       }
   ];
 
@@ -377,10 +403,10 @@ export const generateTestCases = async (
       
       CRITICAL RULES:
       1. Analyze the document/image specifically for this Phase.
-      2. Do not repeat TCs from previous phases (if any).
-      3. **Preconditions**: MUST be a numbered list describing STATE.
-      4. **Steps**: End sentences with NOUNS (명사형) or IMPERATIVE.
-      5. **Results**: Use PASSIVE VOICE (~된다).
+      2. **Preconditions**: MUST be a numbered list describing STATE.
+      3. **Steps**: End sentences with NOUNS (명사형) or IMPERATIVE.
+      4. **Results**: Use PASSIVE VOICE (~된다).
+      5. **Atomicity**: One TC verifies exactly ONE thing.
       
       Output ONLY valid JSON.
       Values MUST be in Korean.
@@ -423,7 +449,7 @@ export const generateTestCases = async (
                accumulatedTestCases = [...accumulatedTestCases, ...currentBatchTCs];
                accumulatedQuestions = [...accumulatedQuestions, ...currentBatchQuestions];
                
-               // Update start number for next loop
+               // Update start number for next loop (Just a hint for AI, meaningless for logic now)
                const lastTC = currentBatchTCs[currentBatchTCs.length - 1];
                currentStartNo = (lastTC?.no || currentStartNo) + 1;
           }
@@ -434,13 +460,11 @@ export const generateTestCases = async (
       }
   }
 
-  // Deduplicate by No just in case
-  const uniqueTestCases = accumulatedTestCases.filter((tc, index, self) =>
-    index === self.findIndex((t) => t.no === tc.no)
-  );
-
-  // Apply sorting and renumbering
-  const finalTestCases = postProcessTestCases(uniqueTestCases);
+  // UPDATED LOGIC:
+  // Removed the problematic `no` based filtering.
+  // We simply take ALL generated TCs and re-sort/re-number them.
+  // This prevents TCs from being deleted just because AI restarted numbering at 1.
+  const finalTestCases = postProcessTestCases(accumulatedTestCases);
 
   return {
     testCases: finalTestCases,
