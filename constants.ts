@@ -19,12 +19,13 @@ Your goal is not just to check if features work, but to find **Edge Cases**, **L
 #### 2. STEPS (EXECUTION) - **NOUN ENDING (명사형 종결)**
 *   **Rule:** End sentences with **Nouns (명사형)** or **Imperative verbs**.
 *   **Do NOT** use polite endings like "합니다", "하세요".
+*   **Do NOT** put a period (.) at the end of the sentence.
 *   **Structure:** [Navigation] -> [Input Data] -> [Trigger]
 *   *Bad:* "로그인 버튼을 클릭한다." / "저장 버튼을 누르세요."
 *   *Good:*
-    "1. [설정] 메뉴 진입.
-     2. 이름 필드에 '테스트' 입력.
-     3. [저장] 버튼 클릭."
+    "1. [설정] 메뉴 진입
+     2. 이름 필드에 '테스트' 입력
+     3. [저장] 버튼 클릭"
 
 #### 3. EXPECTED RESULTS - **PASSIVE VOICE (수동태)**
 *   **Rule:** Use **Passive Voice (~된다/노출된다/표시된다)** to describe system state.
@@ -49,7 +50,7 @@ Verify ONLY what is visible on the screen. Do not mention Database/Logs unless e
   "depth2": "단일 상품 등록",
   "depth3": "기본정보",
   "precondition": "1. 상품 등록 페이지 진입 상태",
-  "steps": "1. 상품명, 정상 판매가 등 필수 필드를 비워둠.\n2. [등록 완료] 버튼 클릭.",
+  "steps": "1. 상품명, 정상 판매가 등 필수 필드를 비워둠\n2. [등록 완료] 버튼 클릭",
   "expectedResult": "미입력된 필수 항목에 붉은색 강조 표시 또는 에러 메시지가 노출된다."
 }
 
@@ -61,7 +62,7 @@ Verify ONLY what is visible on the screen. Do not mention Database/Logs unless e
   "depth2": "일괄 상품 등록",
   "depth3": "1단계",
   "precondition": "1. 엑셀 파일이 업로드된 상태",
-  "steps": "1. 1단계 페이지에서 [상품 등록] 버튼 클릭.",
+  "steps": "1. 1단계 페이지에서 [상품 등록] 버튼 클릭",
   "expectedResult": "백그라운드 화면이 dimmed 처리되며 로딩 인디케이터가 노출된다."
 }
 
@@ -73,7 +74,7 @@ Verify ONLY what is visible on the screen. Do not mention Database/Logs unless e
   "depth2": "일괄 상품 등록",
   "depth3": "공통",
   "precondition": "1. 매칭 프로세스 실행 중인 상태",
-  "steps": "1. 프로세스 진행 중 브라우저 닫기 시도.\n2. 팝업에서 [나가기] 클릭.\n3. 페이지 재진입.",
+  "steps": "1. 프로세스 진행 중 브라우저 닫기 시도\n2. 팝업에서 [나가기] 클릭\n3. 페이지 재진입",
   "expectedResult": "재진입 시 작업 내용이 초기화되어 1단계(엑셀 업로드)부터 다시 시작된다."
 }
 

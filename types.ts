@@ -1,3 +1,4 @@
+
 export interface TestCase {
   id: string;
   no: number;
@@ -25,6 +26,7 @@ export interface Project {
   updatedAt: string;
   files: UploadedFile[];
   testCases: TestCase[];
+  questions: string[]; // Persist questions
   styleFeedback: string;
   chatHistory: ChatMessage[];
 }

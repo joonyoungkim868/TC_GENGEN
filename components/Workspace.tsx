@@ -1,71 +1,57 @@
+
 import React, { useState, useEffect } from 'react';
 import { Project, TestCase } from '../types';
-import { ArrowLeft, Save, Download, MessageSquare, File as FileIcon, Sparkles, Send, X, AlertCircle, CheckCircle } from 'lucide-react';
-import { generateTestCases, updateTestCasesWithQA } from '../services/geminiService';
+import { ArrowLeft, Save, Download, File as FileIcon, Sparkles, AlertCircle, CheckCircle } from 'lucide-react';
 import { exportToExcel } from '../services/excelService';
 
 interface WorkspaceProps {
   project: Project;
   onUpdateProject: (updatedProject: Project) => void;
   onBack: () => void;
+  
+  // Background Props
+  isGenerating: boolean;
+  generationMessage: string;
+  onGenerate: () => void;
+  onRefine: (qaPairs: { question: string; answer: string }[]) => void;
 }
 
-const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack }) => {
-  const [activeTab, setActiveTab] = useState<'files' | 'chat'>('chat');
+const Workspace: React.FC<WorkspaceProps> = ({ 
+    project, 
+    onUpdateProject, 
+    onBack,
+    isGenerating,
+    generationMessage,
+    onGenerate,
+    onRefine
+}) => {
   const [testCases, setTestCases] = useState<TestCase[]>(project.testCases || []);
   const [styleFeedback, setStyleFeedback] = useState(project.styleFeedback || '');
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [aiMessage, setAiMessage] = useState<string>('');
-  const [questions, setQuestions] = useState<string[]>([]);
+  const [questions, setQuestions] = useState<string[]>(project.questions || []); // Use persisted questions
   const [answers, setAnswers] = useState<{[key: number]: string}>({});
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
+  // Sync with project updates (e.g. when background job finishes)
   useEffect(() => {
-    // Only sync if project ID changes, to avoid overwriting local edits during parent re-renders
-    // caused by save actions.
-    if (project.id !== undefined) {
-        // Initial load or project switch
-        // We rely on handleSave to push changes up, and this effect to pull down only on switch.
+    if (project) {
+        setTestCases(project.testCases);
+        setQuestions(project.questions || []);
+        // Note: We don't overwrite styleFeedback while typing usually, 
+        // but here we sync it on load.
     }
-  }, [project.id]);
+  }, [project.testCases, project.questions, project.updatedAt]); // Dependency on specific fields to avoid loops
 
   const handleSave = () => {
     onUpdateProject({
       ...project,
       testCases,
+      questions, // Save questions too
       styleFeedback,
       updatedAt: new Date().toISOString()
     });
   };
 
-  const handleGenerate = async () => {
-    setIsGenerating(true);
-    setQuestions([]);
-    setAnswers({});
-    setAiMessage('문서를 분석하고 테스트 케이스를 생성 중입니다...');
-    
-    try {
-      const result = await generateTestCases(project.files, styleFeedback);
-      
-      setTestCases(prev => [...prev, ...result.testCases]);
-      setQuestions(result.questions);
-      setAiMessage(result.summary || 'TC 생성이 완료되었습니다.');
-      
-      onUpdateProject({
-        ...project,
-        testCases: [...testCases, ...result.testCases],
-        updatedAt: new Date().toISOString()
-      });
-
-    } catch (error) {
-      console.error(error);
-      setAiMessage('오류가 발생했습니다. 다시 시도해주세요.');
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleRefineWithAnswers = async () => {
+  const handleRefineWithAnswers = () => {
       const qaPairs = questions.map((q, idx) => ({
           question: q,
           answer: answers[idx] || "(No answer provided)"
@@ -75,42 +61,10 @@ const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack 
           alert("답변을 하나 이상 입력해주세요.");
           return;
       }
-
-      setIsGenerating(true);
-      setAiMessage('답변을 분석하여 TC를 수정하고 있습니다...');
-
-      try {
-          const result = await updateTestCasesWithQA(
-              project.files,
-              testCases,
-              qaPairs,
-              styleFeedback
-          );
-
-          if (result.testCases.length === 0) {
-              setAiMessage('⚠️ AI가 테스트 케이스를 생성하지 못했습니다. (빈 응답)');
-              alert("AI 응답이 비어있어 업데이트가 취소되었습니다. 다시 시도해주세요.");
-              return;
-          }
-
-          // For refinement, we REPLACE the list to ensure consistency
-          setTestCases(result.testCases);
-          setQuestions(result.questions); // Update questions (maybe fewer now)
-          setAnswers({}); // Clear answers
-          setAiMessage(result.summary || '답변이 반영되어 TC가 수정되었습니다.');
-
-          onUpdateProject({
-              ...project,
-              testCases: result.testCases,
-              updatedAt: new Date().toISOString()
-          });
-
-      } catch (error) {
-          console.error(error);
-          setAiMessage('수정 중 오류가 발생했습니다.');
-      } finally {
-          setIsGenerating(false);
-      }
+      
+      // Call parent
+      onRefine(qaPairs);
+      setAnswers({}); // Clear answers locally
   };
 
   const handleFeedbackSubmit = (e: React.FormEvent) => {
@@ -129,6 +83,8 @@ const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack 
   };
 
   const handleCellChange = (id: string, field: keyof TestCase, value: string) => {
+    // Lock editing while generating to avoid conflicts
+    if (isGenerating) return; 
     setTestCases(prev => prev.map(tc => tc.id === id ? { ...tc, [field]: value } : tc));
   };
 
@@ -163,7 +119,8 @@ const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack 
         <div className="flex items-center gap-2">
            <button 
             onClick={handleSave}
-            className="flex items-center gap-2 px-3 py-1.5 text-slate-600 hover:bg-slate-100 rounded-lg text-sm font-medium transition-colors"
+            disabled={isGenerating}
+            className="flex items-center gap-2 px-3 py-1.5 text-slate-600 hover:bg-slate-100 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
           >
             <Save size={16} />
             저장
@@ -220,8 +177,28 @@ const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack 
                 )}
             </div>
             
-            <div className="flex-1 overflow-auto p-4">
-                <div className="bg-white shadow rounded-lg overflow-hidden border border-slate-200 min-w-[1200px]">
+            <div className="flex-1 overflow-auto p-4 relative">
+                {/* Locking Overlay */}
+                {isGenerating && (
+                    <div className="absolute inset-0 bg-white/50 z-20 flex items-center justify-center backdrop-blur-[1px]">
+                        <div className="bg-white p-6 rounded-2xl shadow-xl border border-blue-100 text-center max-w-sm">
+                            <div className="mx-auto w-12 h-12 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mb-4">
+                                <Sparkles className="animate-spin" />
+                            </div>
+                            <h3 className="text-lg font-bold text-slate-900 mb-2">AI가 열심히 작업 중입니다!</h3>
+                            <p className="text-slate-500 text-sm mb-4">
+                                문서를 분석하고 테스트 케이스를 생성하고 있습니다.<br/>
+                                <strong>잠시 다른 작업을 하셔도 됩니다.</strong><br/>
+                                (대시보드로 나가도 작업은 계속됩니다)
+                            </p>
+                            <p className="text-xs text-blue-600 font-medium bg-blue-50 py-1 px-3 rounded-full inline-block">
+                                {generationMessage}
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                <div className={`bg-white shadow rounded-lg overflow-hidden border border-slate-200 min-w-[1200px] ${isGenerating ? 'opacity-50 pointer-events-none' : ''}`}>
                     <table className="w-full text-sm text-left">
                         <thead className="bg-slate-100 text-slate-700 font-semibold sticky top-0 z-10">
                             <tr>
@@ -283,24 +260,24 @@ const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack 
             
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
                 {/* Status Card */}
-                <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
+                <div className={`bg-slate-50 rounded-lg p-4 border ${isGenerating ? 'border-blue-200 bg-blue-50' : 'border-slate-200'}`}>
                     <h4 className="font-medium text-slate-800 text-sm mb-2">분석 상태</h4>
                     {isGenerating ? (
-                        <div className="flex items-center gap-2 text-blue-600 text-sm animate-pulse">
+                        <div className="flex items-center gap-2 text-blue-600 text-sm animate-pulse font-medium">
                             <Sparkles size={14} /> 작업 처리 중...
                         </div>
                     ) : (
                         <div className="text-sm text-slate-500">대기 중</div>
                     )}
-                    {aiMessage && (
+                    {(generationMessage) && (
                         <div className="mt-2 text-sm text-slate-700 bg-white p-2 rounded border border-slate-200">
-                            {aiMessage}
+                            {generationMessage}
                         </div>
                     )}
                 </div>
 
                 {/* Questions / Q&A Card */}
-                {questions.length > 0 && (
+                {questions.length > 0 && !isGenerating && (
                     <div className="bg-amber-50 rounded-lg border border-amber-200 overflow-hidden">
                         <div className="p-3 bg-amber-100/50 border-b border-amber-200">
                             <h4 className="font-medium text-amber-800 text-sm flex items-center gap-1">
@@ -332,7 +309,7 @@ const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack 
                 )}
 
                 {/* Style Feedback Input */}
-                <div className="bg-white rounded-lg border border-blue-100 shadow-sm p-1">
+                <div className={`bg-white rounded-lg border border-blue-100 shadow-sm p-1 ${isGenerating ? 'opacity-50 pointer-events-none' : ''}`}>
                     <div className="p-3 bg-blue-50 border-b border-blue-100 rounded-t-lg">
                         <h4 className="font-medium text-blue-900 text-sm">스타일 피드백 (Context)</h4>
                         <p className="text-xs text-blue-600 mt-1">
@@ -359,7 +336,7 @@ const Workspace: React.FC<WorkspaceProps> = ({ project, onUpdateProject, onBack 
             {/* Action Area */}
             <div className="p-4 border-t border-slate-200 bg-slate-50">
                 <button
-                    onClick={handleGenerate}
+                    onClick={onGenerate}
                     disabled={isGenerating}
                     className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold rounded-lg shadow-sm transition-all flex items-center justify-center gap-2"
                 >
