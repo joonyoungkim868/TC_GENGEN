@@ -53,17 +53,20 @@ const delay = (ms: number, signal?: AbortSignal) => {
 // --- PROXY ROTATION LOGIC ---
 
 // API Calls require Header forwarding (Auth). 
+// Expanded list to prevent 429 errors
 const PROXY_GENERATORS_API = [
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // Robust backup for JSON
     (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`, 
 ];
 
 // Image Calls are signed URLs, no auth headers needed.
+// Expanded list using Image-optimized proxies first
 const PROXY_GENERATORS_IMAGE = [
-    (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}`, // High stability proxy
+    (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}`, // Best for images
+    (url: string) => `https://images.weserv.nl/?url=${encodeURIComponent(url)}`, // Alias for wsrv
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
 ];
 
 const fetchViaProxy = async (
@@ -82,6 +85,7 @@ const fetchViaProxy = async (
         const proxyUrl = generateUrl(targetUrl);
         
         try {
+            // console.log(`[Proxy] Trying Proxy ${i}: ${proxyUrl.substring(0, 50)}...`);
             const response = await fetch(proxyUrl, { headers, signal });
             
             // Success
@@ -101,7 +105,7 @@ const fetchViaProxy = async (
             
         } catch (error: any) {
             if (error.name === 'AbortError') throw error;
-            console.warn(`[Proxy Rotation] Proxy ${i} network error. Rotating...`, error);
+            console.warn(`[Proxy Rotation] Proxy ${i} network error. Rotating...`, error.message);
             lastError = error;
         }
     }
@@ -132,11 +136,16 @@ const fetchWithRetry = async (
                     waitTimeMs = parsedVal * 1000;
                     console.warn(`[Figma] Rate Limit (429). Server requested wait: ${parsedVal}s.`);
                 }
+            } else {
+                // No Retry-After header? Force a longer wait for 429s on public proxies (min 5s)
+                waitTimeMs = Math.max(defaultBackoff, 5000);
             }
             
             if (retries > 0) {
-                await delay(waitTimeMs + 500, signal);
-                return fetchWithRetry(url, headers, signal, retries - 1, defaultBackoff * 2);
+                console.warn(`[Figma] 429 Rate Limit. Retrying in ${waitTimeMs/1000}s...`);
+                await delay(waitTimeMs + 1000, signal); // Add extra buffer
+                // Exponential backoff for next retry
+                return fetchWithRetry(url, headers, signal, retries - 1, waitTimeMs * 2);
             }
         }
         return response;
@@ -281,8 +290,9 @@ export const processFigmaPage = async (
     if (targets.length === 0) throw new Error("선택된 프레임이 없거나 유효하지 않습니다.");
     console.log(`[Figma] Targets found: ${targets.length}`);
 
-    const TEXT_BATCH_SIZE = 50; 
-    const IMAGE_BATCH_SIZE = 20;
+    // Conservative Batch Sizes to prevent 429 Errors
+    const TEXT_BATCH_SIZE = 20; 
+    const IMAGE_BATCH_SIZE = 5;
 
     const textMap: Record<string, string> = {};
     const imageUrlMap: Record<string, string> = {};
@@ -308,7 +318,7 @@ export const processFigmaPage = async (
         } catch (e: any) {
             if (e.name === 'AbortError') throw e;
         }
-        await delay(500, signal);
+        await delay(2000, signal); // Increased cooldown from 500ms
     }
 
     // 3. Bulk Fetch Image URLs
@@ -354,7 +364,7 @@ export const processFigmaPage = async (
             }
         }
         if (batchData.images) Object.assign(imageUrlMap, batchData.images);
-        await delay(1000, signal);
+        await delay(2000, signal); // Increased cooldown from 1000ms
     }
 
     // 4. Download & Assemble
