@@ -240,7 +240,7 @@ const callGeminiWithRetry = async (
 ): Promise<string> => {
     let apiAttempts = 0;
     const MAX_API_RETRIES = 3; 
-    let currentDelay = 3000; // Start with 3 seconds
+    let currentDelay = 3000; 
 
     while (apiAttempts < MAX_API_RETRIES) {
         try {
@@ -249,7 +249,7 @@ const callGeminiWithRetry = async (
             const config: any = {
                 systemInstruction: baseSystemInstruction,
                 maxOutputTokens: 65536,
-                temperature: 0.3, 
+                temperature: 0.2, // Lower temperature for more analytical/strict results
                 responseMimeType: "application/json",
             };
 
@@ -274,11 +274,34 @@ const callGeminiWithRetry = async (
             if (apiAttempts < MAX_API_RETRIES) {
                 console.log(`[Backoff] Retrying in ${currentDelay}ms...`);
                 await delay(currentDelay);
-                currentDelay = currentDelay * 2; // Exponential Backoff: 3000 -> 6000 -> 12000
+                currentDelay = currentDelay * 2; 
             }
         }
     }
     throw new Error("Failed to get response from Gemini");
+};
+
+// Helper to handle parsing and mapping from Gemini response
+const parseResponse = (responseText: string): { tcs: TestCase[], qs: string[], summary: string } => {
+    let tcs: TestCase[] = [];
+    let qs: string[] = [];
+    let summary = "";
+
+    const cleanText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+    try {
+        const json = JSON.parse(cleanText);
+        const rawTcs = json.testCases || json.testcases || [];
+        tcs = mapToTestCases(rawTcs);
+        qs = json.questions || [];
+        summary = json.summary || "";
+    } catch (e) {
+        console.warn("JSON Parse failed, attempting recovery...");
+        const recovered = recoverTruncatedJson(responseText);
+        tcs = mapToTestCases(recovered.testCases);
+        qs = recovered.questions;
+        summary = recovered.summary;
+    }
+    return { tcs, qs, summary };
 };
 
 export const generateTestCases = async (
@@ -287,13 +310,10 @@ export const generateTestCases = async (
 ): Promise<{ testCases: TestCase[]; questions: string[]; summary: string }> => {
   const ai = getClient();
   
-  // UPDATED STRATEGY: 
-  // 1. Remove Chaos Monkey (Randomness)
-  // 2. Implement De-bundling (Atomic checks)
-  // 3. Implement Arithmetic Formula (N -> N+1)
   const PHASES = [
       { 
           name: "1. Visual Inspector (UI/UX)", 
+          mode: "STANDARD", // Run once
           prompt: `
             **GOAL**: Detect visual anomalies.
             - Scan for **Typos** in labels and guide texts.
@@ -304,6 +324,7 @@ export const generateTestCases = async (
       },
       { 
           name: "2. Flow Navigator (Transitions)", 
+          mode: "DEEP_DIVE", // Run Draft -> Audit -> Expand
           prompt: `
             **GOAL**: Verify screen transitions.
             - Do not just check the current screen. Check where the [Button] takes you.
@@ -313,6 +334,7 @@ export const generateTestCases = async (
       },
       { 
           name: "3. Field Iterator (Input Validation)", 
+          mode: "DEEP_DIVE", // Run Draft -> Audit -> Expand
           prompt: `
             **GOAL**: Exhaustive Input Testing (De-bundling).
             - **LOOP**: For EVERY input field found (A, B, C...):
@@ -320,26 +342,25 @@ export const generateTestCases = async (
               2. Generate TC: [Field A] - Invalid format (Special chars, etc).
               3. Generate TC: [Field A] - Max length exceeded.
             - **WARNING**: Do NOT group fields. "Check all inputs" is FORBIDDEN.
-            - **WARNING**: Do NOT generate just one generic "Input check". Generate 3 per field.
           `
       },
       { 
           name: "4. Logic Calculator (State & Arithmetic)", 
+          mode: "DEEP_DIVE", // Run Draft -> Audit -> Expand
           prompt: `
             **GOAL**: Verify numeric changes and state updates.
             - **FORMULA**: If a list item is added/removed, use formula: **[Before: N] -> [After: N+1]** or **[N-1]**.
             - Explicitly mention the calculation in Expected Result. (e.g., "Count increases from 0 to 1").
             - Verify Pagination (Page 1 -> Page 2).
-            - Verify Filters (Total 10 -> Filtered 3).
           `
       },
       { 
           name: "5. Context-Based Stability (Retention)", 
+          mode: "STANDARD",
           prompt: `
             **GOAL**: Verify data persistence and safe failures.
             - Test **Browser Refresh (F5)**: Does the form data survive?
             - Test **Back Button**: Can user return to previous state safely?
-            - **CONDITIONAL**: Only generate 'Network Disconnect' or 'Timeout' cases IF those specific keywords (e.g. "Network", "Timeout") appear in the document text. Otherwise, ignore.
           `
       }
   ];
@@ -347,7 +368,6 @@ export const generateTestCases = async (
   let accumulatedTestCases: TestCase[] = [];
   let accumulatedQuestions: string[] = [];
   let finalSummary = "";
-  
   let currentStartNo = 1;
 
   const baseParts: any[] = [];
@@ -375,88 +395,105 @@ export const generateTestCases = async (
   // Loop through each Phase
   for (let i = 0; i < PHASES.length; i++) {
       const currentPhase = PHASES[i];
-      console.log(`[Gemini Loop] Starting ${currentPhase.name} - StartNo: ${currentStartNo}`);
+      console.log(`[Gemini Loop] Starting ${currentPhase.name} (Mode: ${currentPhase.mode})`);
 
-      // Dynamic Phase Prompt Injection
-      const loopPrompt = `
-      --- COMMAND ---
+      // ---------------------------------------------------------
+      // STEP 1: DRAFT (Create initial list)
+      // ---------------------------------------------------------
+      const draftPrompt = `
+      --- COMMAND: STEP 1 (DRAFT) ---
       CURRENT PHASE: ${currentPhase.name}
+      START_NO: ${currentStartNo}
       
-      Generate Test Cases starting from No.${currentStartNo}.
-
-      ### STRATEGY: EXHAUSTIVE COVERAGE (NO LIMITS)
-
-      **Rule 1: NO ITEM LEFT BEHIND**
-      - Do NOT stop at 10 items. Do NOT stop at 20. 
-      - You must iterate through **EVERY** element visible in the file.
-      - If there are 5 input fields, you must generate at least 15 TCs (3 per field).
-      - If there are 10 buttons, check each one (Click, Disabled State, Hover).
-
-      **Rule 2: TRUTH TABLE MATRIX**
-      - For every element, exhaustively check its states.
-      - Input: [Valid, Invalid, Empty, Max Length, Special Chars]
-      - Button: [Click, Double Click, Disabled]
+      **TASK**: Generate an exhaustive list of Test Cases for this phase.
       
-      **Rule 3: NO HALLUCINATIONS**
-      - Only generate cases for elements **ACTUALLY VISIBLE** or **MENTIONED** in the document.
-      - Do NOT invent features (e.g., "Forgot Password" link) if it is not shown.
-      - Better to have fewer accurate cases than many fake ones. But if the element exists, verify it fully.
-
-      PHASE INSTRUCTION (Focus Area):
+      **STRATEGY**:
+      1. Iterate through EVERY visible element.
+      2. Apply Truth Table (Valid/Invalid/Empty).
+      3. Do NOT stop until all elements are covered.
+      
+      PHASE INSTRUCTION:
       ${currentPhase.prompt}
       
-      CRITICAL FORMATTING:
-      1. **Preconditions**: MUST be a numbered list describing STATE.
-      2. **Steps**: End sentences with NOUNS (명사형). **NO PERIOD(.) at end.**
-      3. **Results**: Use PASSIVE VOICE (~된다).
-      
       Output ONLY valid JSON.
-      Values MUST be in Korean.
       --- END COMMAND ---
       `;
-      
-      const parts = [...baseParts, { text: loopPrompt }];
+
+      let phaseTCs: TestCase[] = [];
+      let phaseQs: string[] = [];
 
       try {
-          const responseText = await callGeminiWithRetry(ai, parts, baseSystemInstruction, true);
-          
-          let currentBatchTCs: TestCase[] = [];
-          let currentBatchQuestions: string[] = [];
-          
-          const cleanText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-          
-          try {
-              const json = JSON.parse(cleanText);
-              const tcs = json.testCases || json.testcases || [];
-              currentBatchTCs = mapToTestCases(tcs);
-              currentBatchQuestions = json.questions || [];
-              if (json.summary) finalSummary += ` [${i+1}] ${json.summary}`;
+          const draftResponse = await callGeminiWithRetry(ai, [...baseParts, { text: draftPrompt }], baseSystemInstruction, true);
+          const parsed = parseResponse(draftResponse);
+          phaseTCs = parsed.tcs;
+          phaseQs = parsed.qs;
+          if (parsed.summary) finalSummary += ` [${currentPhase.name}] ${parsed.summary}`;
 
-          } catch (e) {
-              console.warn("JSON Parse failed, attempting recovery...");
-              const recovered = recoverTruncatedJson(responseText);
-              currentBatchTCs = mapToTestCases(recovered.testCases);
-              currentBatchQuestions = recovered.questions;
+          // ---------------------------------------------------------
+          // STEP 2 & 3: AUDIT & EXPAND (Only for DEEP_DIVE phases)
+          // ---------------------------------------------------------
+          if (currentPhase.mode === "DEEP_DIVE" && phaseTCs.length > 0) {
+              
+              // We minimize the draft list to save tokens, sending only key fields for review
+              const draftSummary = JSON.stringify(phaseTCs.map(tc => ({ no: tc.no, title: tc.title, steps: tc.steps, expected: tc.expectedResult })));
+
+              const auditPrompt = `
+              --- COMMAND: STEP 2 (AUDIT & EXPAND) ---
+              CURRENT PHASE: ${currentPhase.name}
+              
+              You are now the **Lead Auditor**.
+              Review the "Draft Test Cases" provided below against the visual document.
+
+              **TASK A: FACT CHECK (Quality Control)**
+              - **Verify Existence**: Does the element mentioned in the TC *actually exist* in the image/text? 
+                - If NO, discard it.
+                - If text labels (Button names) are wrong, correct them.
+              - **Verify Logic**: Is the expected result realistic based on the provided UI?
+
+              **TASK B: GAP ANALYSIS (Quantity Expansion)**
+              - Look for "Blind Spots" that the Draft missed.
+              - Are there other buttons, links, or inputs in the image that were ignored?
+              - Are there negative cases (Error handling) missing?
+              
+              **FINAL OUTPUT**:
+              - Regenerate the **FULL, CLEAN LIST**.
+              - Include the valid/corrected TCs from the Draft.
+              - Appending NEW TCs for the missing gaps found in Task B.
+              - Start numbering from ${currentStartNo}.
+
+              DRAFT TEST CASES (For Review):
+              ${draftSummary}
+
+              Output ONLY valid JSON.
+              --- END COMMAND ---
+              `;
+
+              console.log(`[Gemini Loop] Deep Dive Audit for ${currentPhase.name}...`);
+              const auditResponse = await callGeminiWithRetry(ai, [...baseParts, { text: auditPrompt }], baseSystemInstruction, true);
+              const audited = parseResponse(auditResponse);
+              
+              // If audit returns results, trust the Auditor. If it fails/returns empty, fallback to Draft.
+              if (audited.tcs.length > 0) {
+                  console.log(`[Gemini Loop] Audit complete. TC Count: ${phaseTCs.length} -> ${audited.tcs.length}`);
+                  phaseTCs = audited.tcs; // Replace draft with audited version
+                  phaseQs = [...phaseQs, ...audited.qs]; // Accumulate questions
+              } else {
+                  console.warn(`[Gemini Loop] Audit returned 0 TCs. Reverting to Draft.`);
+              }
           }
 
-          if (currentBatchTCs.length === 0) {
-              console.warn(`[Phase ${i+1}] No TCs generated. Moving to next phase.`);
-              continue; 
-          }
-
-          currentBatchTCs = normalizeTestCases(currentBatchTCs);
-
-          // Append to total
-          if (currentBatchTCs.length > 0) {
-               accumulatedTestCases = [...accumulatedTestCases, ...currentBatchTCs];
-               accumulatedQuestions = [...accumulatedQuestions, ...currentBatchQuestions];
+          // Normalize and Append
+          phaseTCs = normalizeTestCases(phaseTCs);
+          if (phaseTCs.length > 0) {
+               accumulatedTestCases = [...accumulatedTestCases, ...phaseTCs];
+               accumulatedQuestions = [...accumulatedQuestions, ...phaseQs];
                
-               const lastTC = currentBatchTCs[currentBatchTCs.length - 1];
+               const lastTC = phaseTCs[phaseTCs.length - 1];
                currentStartNo = (lastTC?.no || currentStartNo) + 1;
           }
 
       } catch (error) {
-          console.error(`Error in loop ${i+1}:`, error);
+          console.error(`Error in loop ${currentPhase.name}:`, error);
       }
   }
 
@@ -465,7 +502,7 @@ export const generateTestCases = async (
   return {
     testCases: finalTestCases,
     questions: Array.from(new Set(accumulatedQuestions)),
-    summary: finalSummary || `Generated ${finalTestCases.length} Test Cases across all phases.`
+    summary: finalSummary || `Generated ${finalTestCases.length} Test Cases via Deep Dive Analysis.`
   };
 };
 
@@ -533,33 +570,15 @@ export const updateTestCasesWithQA = async (
 
     try {
         const responseText = await callGeminiWithRetry(ai, parts, baseSystemInstruction, true);
+        const parsed = parseResponse(responseText);
         
-        let newTCs: TestCase[] = [];
-        let newQuestions: string[] = [];
-        let summary = "";
-
-        const cleanText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-        try {
-            const json = JSON.parse(cleanText);
-            const tcs = json.testCases || json.testcases || [];
-            newTCs = mapToTestCases(tcs);
-            newQuestions = json.questions || [];
-            summary = json.summary || "Updated based on Q&A.";
-        } catch (e) {
-            console.log("JSON parse failed during update, attempting recovery...");
-            const recovered = recoverTruncatedJson(responseText);
-            newTCs = mapToTestCases(recovered.testCases);
-            newQuestions = recovered.questions;
-        }
-
-        newTCs = normalizeTestCases(newTCs);
-
+        let newTCs = normalizeTestCases(parsed.tcs);
         const finalTestCases = postProcessTestCases(newTCs);
 
         return {
             testCases: finalTestCases,
-            questions: newQuestions,
-            summary
+            questions: parsed.qs,
+            summary: parsed.summary || "Updated based on Q&A."
         };
 
     } catch (error) {
