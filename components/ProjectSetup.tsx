@@ -1,8 +1,9 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { UploadedFile } from '../types';
-import { UploadCloud, X, File as FileIcon, Loader2, Image as ImageIcon, AlertTriangle, Figma, Layout, ArrowRight, Layers } from 'lucide-react';
+import { UploadCloud, X, File as FileIcon, Loader2, Image as ImageIcon, AlertTriangle, Figma, Layout, ArrowRight, Layers, CheckSquare, Square } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
-import { getFigmaFilePages, processFigmaPage, FigmaPage } from '../services/figmaService';
+import { getFigmaFilePages, getFigmaFrames, processFigmaPage, FigmaPage, FigmaLayer } from '../services/figmaService';
 
 interface ProjectSetupProps {
   onCancel: () => void;
@@ -10,7 +11,7 @@ interface ProjectSetupProps {
 }
 
 type TabMode = 'UPLOAD' | 'FIGMA';
-type FigmaStep = 'INPUT' | 'SELECT_PAGE' | 'PROCESSING';
+type FigmaStep = 'INPUT' | 'SELECT_PAGE' | 'SELECT_LAYER' | 'PROCESSING';
 
 const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => {
   const [mode, setMode] = useState<TabMode>('UPLOAD');
@@ -28,6 +29,11 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
   const [figmaToken, setFigmaToken] = useState('');
   const [figmaUrl, setFigmaUrl] = useState('');
   const [figmaPages, setFigmaPages] = useState<FigmaPage[]>([]);
+  
+  // Layer Selection State
+  const [selectedPage, setSelectedPage] = useState<FigmaPage | null>(null);
+  const [figmaLayers, setFigmaLayers] = useState<FigmaLayer[]>([]);
+  const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(new Set());
 
   // Abort Controller Ref for cancelling previous requests
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -106,11 +112,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
 
   // Step 1: Fetch Pages
   const handleFetchPages = async () => {
-      // Abort any pending request
-      if (abortControllerRef.current) {
-          abortControllerRef.current.abort();
-      }
-      // Create new controller
+      if (abortControllerRef.current) abortControllerRef.current.abort();
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
@@ -122,15 +124,11 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
       setLoadingMsg("파일 구조 분석 중...");
 
       try {
-          // Pass the signal to the service
           const pages = await getFigmaFilePages(figmaUrl, figmaToken, controller.signal);
           setFigmaPages(pages);
           setFigmaStep('SELECT_PAGE');
       } catch (err: any) {
-          if (err.name === 'AbortError') {
-              console.log("Request aborted by user.");
-              return;
-          }
+          if (err.name === 'AbortError') return;
           setErrorMsg(err.message || "Figma 페이지 목록을 가져오는데 실패했습니다.");
       } finally {
           setIsLoading(false);
@@ -139,39 +137,80 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
       }
   };
 
-  // Step 2: Select Page & Process
+  // Step 2: Fetch Layers (Frames) for selected Page
   const handlePageSelect = async (page: FigmaPage) => {
-      // Abort any pending request
-      if (abortControllerRef.current) {
-          abortControllerRef.current.abort();
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      setIsLoading(true);
+      setErrorMsg(null);
+      setLoadingMsg(`'${page.name}' 상세 구조 분석 중...`);
+      setSelectedPage(page);
+
+      try {
+          const layers = await getFigmaFrames(figmaUrl, figmaToken, page.id, controller.signal);
+          setFigmaLayers(layers);
+          // Default: Select ALL layers
+          setSelectedLayerIds(new Set(layers.map(l => l.id)));
+          setFigmaStep('SELECT_LAYER');
+      } catch (err: any) {
+          if (err.name === 'AbortError') return;
+          setErrorMsg(err.message || "페이지 상세 정보를 가져오는데 실패했습니다.");
+      } finally {
+          setIsLoading(false);
+          setLoadingMsg("");
+          abortControllerRef.current = null;
       }
+  };
+
+  // Step 3: Layer Selection Logic
+  const toggleLayer = (id: string) => {
+      const newSet = new Set(selectedLayerIds);
+      if (newSet.has(id)) newSet.delete(id);
+      else newSet.add(id);
+      setSelectedLayerIds(newSet);
+  };
+
+  const toggleAllLayers = () => {
+      if (selectedLayerIds.size === figmaLayers.length) {
+          setSelectedLayerIds(new Set()); // Deselect all
+      } else {
+          setSelectedLayerIds(new Set(figmaLayers.map(l => l.id))); // Select all
+      }
+  };
+
+  // Step 4: Process Selected Layers
+  const handleProcessLayers = async () => {
+      if (selectedLayerIds.size === 0) return setErrorMsg("최소 1개의 프레임을 선택해주세요.");
+      if (!selectedPage) return;
+
+      if (abortControllerRef.current) abortControllerRef.current.abort();
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
       setFigmaStep('PROCESSING');
       setIsLoading(true);
       setErrorMsg(null);
-      setLoadingMsg(`'${page.name}' 페이지 분석 및 다운로드 중...`);
+      setLoadingMsg(`선택된 ${selectedLayerIds.size}개 프레임 다운로드 및 분석 중...`);
 
       try {
           const figmaFiles = await processFigmaPage(
               figmaUrl, 
               figmaToken, 
-              page.id, 
+              selectedPage.id, 
               (msg) => setLoadingMsg(msg),
-              controller.signal
+              controller.signal,
+              Array.from(selectedLayerIds) // Pass selected IDs to service
           );
           setFiles(prev => [...prev, ...figmaFiles]);
           setMode('UPLOAD'); // Switch to main view
           setFigmaStep('INPUT'); // Reset Figma flow
-          if (!name) setName(`Figma Analysis - ${page.name}`);
+          if (!name) setName(`Figma Analysis - ${selectedPage.name}`);
       } catch (err: any) {
-          if (err.name === 'AbortError') {
-              console.log("Request aborted by user.");
-              return;
-          }
-          setErrorMsg(err.message || "페이지 데이터를 처리하는 중 오류가 발생했습니다.");
-          setFigmaStep('SELECT_PAGE'); // Go back to selection on error
+          if (err.name === 'AbortError') return;
+          setErrorMsg(err.message || "데이터 처리 중 오류가 발생했습니다.");
+          setFigmaStep('SELECT_LAYER'); // Return to layer selection on error
       } finally {
           setIsLoading(false);
           setLoadingMsg("");
@@ -185,7 +224,11 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
           abortControllerRef.current = null;
       }
       setIsLoading(false);
-      setFigmaStep('INPUT');
+      
+      // Navigate back based on current step
+      if (figmaStep === 'SELECT_LAYER') setFigmaStep('SELECT_PAGE');
+      else if (figmaStep === 'SELECT_PAGE') setFigmaStep('INPUT');
+      else setFigmaStep('INPUT');
   };
 
   const handleSubmit = () => {
@@ -264,7 +307,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
                     </div>
                 </div>
             ) : (
-                // New Figma Logic
+                // Figma Logic
                 <div className="space-y-4 py-2">
                      <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
                         {figmaStep === 'INPUT' && (
@@ -324,12 +367,79 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
                                         <button
                                             key={page.id}
                                             onClick={() => handlePageSelect(page)}
-                                            className="p-3 text-left bg-white border border-slate-200 rounded hover:border-blue-400 hover:bg-blue-50 transition-all text-sm font-medium text-slate-700 truncate shadow-sm"
+                                            className="p-3 text-left bg-white border border-slate-200 rounded hover:border-blue-400 hover:bg-blue-50 transition-all text-sm font-medium text-slate-700 truncate shadow-sm group"
                                         >
-                                            {page.name}
+                                            <span className="block truncate">{page.name}</span>
+                                            <span className="text-[10px] text-slate-400 group-hover:text-blue-400">클릭하여 레이어 선택</span>
                                         </button>
                                     ))}
                                 </div>
+                            </>
+                        )}
+
+                        {figmaStep === 'SELECT_LAYER' && selectedPage && (
+                            <>
+                                <div className="flex justify-between items-center mb-3">
+                                    <div>
+                                        <h3 className="font-medium text-slate-900 flex items-center gap-2">
+                                            <Layout size={18} className="text-blue-500" />
+                                            분석할 프레임 선택
+                                        </h3>
+                                        <p className="text-xs text-slate-500 mt-0.5">
+                                            Page: {selectedPage.name} ({selectedLayerIds.size}개 선택됨)
+                                        </p>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button 
+                                            onClick={toggleAllLayers}
+                                            className="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-slate-600 transition-colors"
+                                        >
+                                            {selectedLayerIds.size === figmaLayers.length ? '전체 해제' : '전체 선택'}
+                                        </button>
+                                        <button 
+                                            onClick={() => setFigmaStep('SELECT_PAGE')}
+                                            className="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-slate-600 transition-colors"
+                                        >
+                                            뒤로
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white border border-slate-200 rounded-lg max-h-64 overflow-y-auto p-1 space-y-0.5">
+                                    {figmaLayers.length === 0 ? (
+                                        <div className="p-4 text-center text-sm text-slate-500">
+                                            이 페이지에는 분석 가능한 프레임이 없습니다.
+                                        </div>
+                                    ) : (
+                                        figmaLayers.map(layer => {
+                                            const isSelected = selectedLayerIds.has(layer.id);
+                                            return (
+                                                <div 
+                                                    key={layer.id}
+                                                    onClick={() => toggleLayer(layer.id)}
+                                                    className={`flex items-center gap-3 p-2 rounded cursor-pointer text-sm transition-colors ${isSelected ? 'bg-blue-50 text-blue-900' : 'hover:bg-slate-50 text-slate-700'}`}
+                                                >
+                                                    <div className={`flex-shrink-0 ${isSelected ? 'text-blue-500' : 'text-slate-300'}`}>
+                                                        {isSelected ? <CheckSquare size={18} /> : <Square size={18} />}
+                                                    </div>
+                                                    <div className="truncate flex-1">
+                                                        <span className="font-medium">{layer.name}</span>
+                                                        <span className="ml-2 text-[10px] text-slate-400 uppercase bg-slate-100 px-1 rounded">{layer.type}</span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                                
+                                <button
+                                    onClick={handleProcessLayers}
+                                    disabled={selectedLayerIds.size === 0 || isLoading}
+                                    className="w-full mt-3 bg-blue-600 text-white py-2 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium flex items-center justify-center gap-2"
+                                >
+                                    {isLoading ? <Loader2 className="animate-spin" size={16} /> : <ArrowRight size={16} />}
+                                    선택한 프레임 분석 시작
+                                </button>
                             </>
                         )}
 
@@ -394,10 +504,10 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
           </button>
           <button
             onClick={handleSubmit}
-            disabled={isLoading || figmaStep === 'PROCESSING'}
-            className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+            className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-sm transition-colors flex items-center gap-2"
           >
             프로젝트 생성
+            <ArrowRight size={18} />
           </button>
         </div>
       </div>

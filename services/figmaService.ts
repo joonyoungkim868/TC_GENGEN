@@ -17,6 +17,12 @@ export interface FigmaPage {
     name: string;
 }
 
+export interface FigmaLayer {
+    id: string;
+    name: string;
+    type: string;
+}
+
 // Helper to chunk array
 const chunkArray = <T>(array: T[], size: number): T[][] => {
     const chunked: T[][] = [];
@@ -210,12 +216,45 @@ export const getFigmaFilePages = async (
     return pages;
 };
 
+// NEW: Fetch eligible layers (Frames, Sections, Groups) for a specific page
+export const getFigmaFrames = async (
+    fileUrl: string,
+    accessToken: string,
+    pageId: string,
+    signal?: AbortSignal
+): Promise<FigmaLayer[]> => {
+    const fileKey = extractFileKey(fileUrl);
+    if (!fileKey) throw new Error("유효하지 않은 Figma URL입니다.");
+
+    const headers = { 'X-Figma-Token': accessToken };
+    const listUrl = `${FIGMA_API_BASE}/files/${fileKey}/nodes?ids=${pageId}&depth=1`;
+    
+    const resp = await fetchWithRetry(listUrl, headers, signal);
+    if (!resp.ok) throw new Error("레이어 정보를 가져오는데 실패했습니다.");
+
+    const data = await resp.json();
+    const pageNode = data.nodes[pageId]?.document;
+    if (!pageNode) throw new Error("페이지 노드를 찾을 수 없습니다.");
+
+    const validTypes = ['FRAME', 'SECTION', 'COMPONENT', 'INSTANCE', 'GROUP'];
+    const layers = pageNode.children
+        .filter((child: any) => validTypes.includes(child.type))
+        .map((child: any) => ({
+            id: child.id,
+            name: child.name,
+            type: child.type
+        }));
+
+    return layers;
+};
+
 export const processFigmaPage = async (
     fileUrl: string, 
     accessToken: string,
     pageId: string,
     onProgress: (msg: string) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    targetNodeIds?: string[] // Optional: If provided, only process these IDs
 ): Promise<UploadedFile[]> => {
     const fileKey = extractFileKey(fileUrl);
     if (!fileKey) throw new Error("유효하지 않은 Figma URL입니다.");
@@ -232,9 +271,14 @@ export const processFigmaPage = async (
     if (!pageNode) throw new Error("페이지 노드 없음");
 
     const validTypes = ['FRAME', 'SECTION', 'COMPONENT', 'INSTANCE', 'GROUP', 'TEXT'];
-    const targets = pageNode.children.filter((child: any) => validTypes.includes(child.type));
+    let targets = pageNode.children.filter((child: any) => validTypes.includes(child.type));
     
-    if (targets.length === 0) throw new Error("변환할 프레임, 그룹, 또는 텍스트가 없습니다.");
+    // Filter by Selected IDs if provided
+    if (targetNodeIds && targetNodeIds.length > 0) {
+        targets = targets.filter((child: any) => targetNodeIds.includes(child.id));
+    }
+
+    if (targets.length === 0) throw new Error("선택된 프레임이 없거나 유효하지 않습니다.");
     console.log(`[Figma] Targets found: ${targets.length}`);
 
     const TEXT_BATCH_SIZE = 50; 

@@ -384,37 +384,31 @@ export const generateTestCases = async (
       
       Generate Test Cases starting from No.${currentStartNo}.
 
-      ### STRATEGY: CHAIN OF THOUGHT & TRAVERSAL (CRITICAL)
+      ### STRATEGY: EXHAUSTIVE COVERAGE (NO LIMITS)
 
-      **Step 1: The "Virtual Finger" Simulation**
-      Before generating any TC, simulate a user's finger moving through the content.
-      - **IF IMAGE:** Scan strictly from **Top-Left ↘ Bottom-Right** (Z-Pattern).
-      - **IF TEXT:** Scan hierarchically: **[Section Title] ↘ [Subtitle] ↘ [Form Input] ↘ [Action Button]**.
+      **Rule 1: NO ITEM LEFT BEHIND**
+      - Do NOT stop at 10 items. Do NOT stop at 20. 
+      - You must iterate through **EVERY** element visible in the file.
+      - If there are 5 input fields, you must generate at least 15 TCs (3 per field).
+      - If there are 10 buttons, check each one (Click, Disabled State, Hover).
 
-      **Step 2: The "Stop & Verify" Rule**
-      Do not rush to the submit button. Stop at **EVERY** element your virtual finger touches.
-      - **Found a Text Label?** -> Generate TC: "Check text visibility/typo".
-      - **Found an Input Field?** -> Generate TCs: "Valid input", "Empty input", "Max length", "Special chars".
-      - **Found a List?** -> Generate TCs: "1 item", "Multi items", "Empty list".
-      - **Found a Date Picker?** -> Generate TCs: "Past date", "Future date", "Start > End".
-
-      **Step 3: Matrix Permutation (Multi-Angle Verification)**
-      Do not generate just one case. Exploit the "State Matrix" for every found element:
-      - **Input Fields:** [Empty, Valid, Invalid Type, Max Length, Min Length]
-      - **Buttons:** [Active, Disabled, Hover, Double Click]
-      - **Checkboxes/Radios:** [Default, Selected, Unselected, Toggle]
-      - **Popups:** [Confirm, Cancel, Close(x), Outside Click]
-      - **Date/Time:** [Past, Future, Range(Start>End), Invalid Format]
+      **Rule 2: TRUTH TABLE MATRIX**
+      - For every element, exhaustively check its states.
+      - Input: [Valid, Invalid, Empty, Max Length, Special Chars]
+      - Button: [Click, Double Click, Disabled]
+      
+      **Rule 3: NO HALLUCINATIONS**
+      - Only generate cases for elements **ACTUALLY VISIBLE** or **MENTIONED** in the document.
+      - Do NOT invent features (e.g., "Forgot Password" link) if it is not shown.
+      - Better to have fewer accurate cases than many fake ones. But if the element exists, verify it fully.
 
       PHASE INSTRUCTION (Focus Area):
       ${currentPhase.prompt}
       
-      CRITICAL RULES:
-      1. Analyze the document/image specifically for this Phase.
-      2. **Preconditions**: MUST be a numbered list describing STATE.
-      3. **Steps**: End sentences with NOUNS (명사형) or IMPERATIVE. **DO NOT end with a period(.).**
-      4. **Results**: Use PASSIVE VOICE (~된다).
-      5. **Atomicity**: One TC verifies exactly ONE thing. **NO BUNDLING.**
+      CRITICAL FORMATTING:
+      1. **Preconditions**: MUST be a numbered list describing STATE.
+      2. **Steps**: End sentences with NOUNS (명사형). **NO PERIOD(.) at end.**
+      3. **Results**: Use PASSIVE VOICE (~된다).
       
       Output ONLY valid JSON.
       Values MUST be in Korean.
