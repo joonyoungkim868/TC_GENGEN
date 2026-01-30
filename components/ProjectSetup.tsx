@@ -28,6 +28,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
   const [figmaStep, setFigmaStep] = useState<FigmaStep>('INPUT');
   const [figmaToken, setFigmaToken] = useState('');
   const [figmaUrl, setFigmaUrl] = useState('');
+  // Custom Proxy State removed as it is now hardcoded in service
   const [figmaPages, setFigmaPages] = useState<FigmaPage[]>([]);
   
   // Layer Selection State
@@ -124,6 +125,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
       setLoadingMsg("파일 구조 분석 중...");
 
       try {
+          // Removed customProxy argument
           const pages = await getFigmaFilePages(figmaUrl, figmaToken, controller.signal);
           setFigmaPages(pages);
           setFigmaStep('SELECT_PAGE');
@@ -149,6 +151,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
       setSelectedPage(page);
 
       try {
+          // Removed customProxy argument
           const layers = await getFigmaFrames(figmaUrl, figmaToken, page.id, controller.signal);
           setFigmaLayers(layers);
           // Default: Select ALL layers
@@ -195,13 +198,14 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
       setLoadingMsg(`선택된 ${selectedLayerIds.size}개 프레임 다운로드 및 분석 중...`);
 
       try {
+          // Removed customProxy argument
           const figmaFiles = await processFigmaPage(
               figmaUrl, 
               figmaToken, 
               selectedPage.id, 
               (msg) => setLoadingMsg(msg),
               controller.signal,
-              Array.from(selectedLayerIds) // Pass selected IDs to service
+              Array.from(selectedLayerIds)
           );
           setFiles(prev => [...prev, ...figmaFiles]);
           setMode('UPLOAD'); // Switch to main view
@@ -336,6 +340,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onCancel, onComplete }) => 
                                             className="w-full px-3 py-2 border border-slate-300 rounded focus:ring-1 focus:ring-blue-500 outline-none text-sm"
                                         />
                                     </div>
+
                                     <button
                                         onClick={handleFetchPages}
                                         disabled={isLoading}

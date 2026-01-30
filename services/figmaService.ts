@@ -3,6 +3,8 @@ import { UploadedFile } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
 const FIGMA_API_BASE = "https://api.figma.com/v1";
+// Hardcoded Custom Proxy URL provided by user
+const FIXED_PROXY_URL = "https://weathered-rice-71c4.red-smoke-22ef.workers.dev";
 
 interface FigmaNode {
     id: string;
@@ -15,6 +17,7 @@ interface FigmaNode {
 export interface FigmaPage {
     id: string;
     name: string;
+    type: string;
 }
 
 export interface FigmaLayer {
@@ -50,23 +53,12 @@ const delay = (ms: number, signal?: AbortSignal) => {
     });
 };
 
-// --- PROXY ROTATION LOGIC ---
+// --- PROXY STRATEGY ---
 
-// API Calls require Header forwarding (Auth). 
-// Expanded list to prevent 429 errors
-const PROXY_GENERATORS_API = [
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // Robust backup for JSON
-    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`, 
-];
-
-// Image Calls are signed URLs, no auth headers needed.
-// Expanded list using Image-optimized proxies first
 const PROXY_GENERATORS_IMAGE = [
-    (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}`, // Best for images
-    (url: string) => `https://images.weserv.nl/?url=${encodeURIComponent(url)}`, // Alias for wsrv
+    (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}`, 
+    (url: string) => `https://images.weserv.nl/?url=${encodeURIComponent(url)}`,
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
 ];
 
 const fetchViaProxy = async (
@@ -75,7 +67,18 @@ const fetchViaProxy = async (
     signal?: AbortSignal, 
     isImage: boolean = false
 ): Promise<Response> => {
-    const generators = isImage ? PROXY_GENERATORS_IMAGE : PROXY_GENERATORS_API;
+    let generators: ((url: string) => string)[];
+
+    if (!isImage) {
+        // [API CALLS] Use the robust FIXED Custom Worker
+        // Ensure no trailing slash and append query
+        const cleanProxy = FIXED_PROXY_URL.replace(/\/$/, '');
+        generators = [(url) => `${cleanProxy}?url=${encodeURIComponent(url)}`];
+    } else {
+        // [IMAGE CALLS] Use Image CDNs for performance & bandwidth saving on the worker
+        generators = PROXY_GENERATORS_IMAGE;
+    }
+
     let lastError: any;
 
     for (let i = 0; i < generators.length; i++) {
@@ -85,31 +88,40 @@ const fetchViaProxy = async (
         const proxyUrl = generateUrl(targetUrl);
         
         try {
-            // console.log(`[Proxy] Trying Proxy ${i}: ${proxyUrl.substring(0, 50)}...`);
             const response = await fetch(proxyUrl, { headers, signal });
             
-            // Success
-            if (response.ok) return response;
+            if (response.status === 404) return response;
 
-            // Handle Specific Hard Failures (Do not retry)
-            // 404: Not Found -> The resource is really gone.
-            if (response.status === 404) {
-                return response;
+            // 429 Logic
+            if (response.status === 429) {
+                // If it's the Fixed Proxy (API) or the last Image proxy, return 429 to let retry logic handle it.
+                if (generators.length === 1 || i === generators.length - 1) {
+                    return response; 
+                }
+                console.warn(`[Proxy ${i}] Rate Limited. Rotating...`);
+                continue; 
             }
 
-            // Handle Retry-able Failures
-            // 403: Forbidden (Proxy Blocked) -> Rotate
-            // 429: Rate Limit -> Rotate
-            // 5xx: Server Error -> Rotate
-            console.warn(`[Proxy Rotation] Proxy ${i} returned ${response.status}. Rotating...`);
+            if (response.ok) return response;
             
+            // Server Error -> Rotate
+            if (response.status >= 500) {
+                 console.warn(`[Proxy ${i}] Server Error ${response.status}. Rotating...`);
+                 continue;
+            }
+            
+            return response;
+
         } catch (error: any) {
             if (error.name === 'AbortError') throw error;
-            console.warn(`[Proxy Rotation] Proxy ${i} network error. Rotating...`, error.message);
+            console.warn(`[Proxy ${i}] Network Error: ${error.message}. Rotating...`);
             lastError = error;
         }
+
+        if (i < generators.length - 1) await delay(500, signal);
     }
-    throw lastError || new Error("All proxies failed to fetch the resource.");
+    
+    throw lastError || new Error("All proxies failed to fetch.");
 };
 
 // --- END PROXY LOGIC ---
@@ -120,13 +132,14 @@ const fetchWithRetry = async (
     headers: any, 
     signal?: AbortSignal,
     retries = 3, 
-    defaultBackoff = 2000
+    defaultBackoff = 3000
 ): Promise<Response> => {
     try {
-        // Use fetchViaProxy for API calls (isImage = false)
         const response = await fetchViaProxy(url, headers, signal, false);
         
         if (response.status === 429) {
+            if (retries <= 0) throw new Error("API Rate Limit Exceeded (Max Retries Reached)");
+
             const retryAfterHeader = response.headers.get('Retry-After');
             let waitTimeMs = defaultBackoff;
 
@@ -134,26 +147,31 @@ const fetchWithRetry = async (
                 const parsedVal = parseInt(retryAfterHeader, 10);
                 if (!isNaN(parsedVal)) {
                     waitTimeMs = parsedVal * 1000;
-                    console.warn(`[Figma] Rate Limit (429). Server requested wait: ${parsedVal}s.`);
+                    console.warn(`[Figma] Server requested wait: ${parsedVal}s.`);
+                    
+                    if (waitTimeMs > 60000) {
+                        throw new Error(`프록시 서버가 과도한 요청으로 차단되었습니다 (대기: ${parsedVal}초). 잠시 후 다시 시도해주세요.`);
+                    }
                 }
             } else {
-                // No Retry-After header? Force a longer wait for 429s on public proxies (min 5s)
-                waitTimeMs = Math.max(defaultBackoff, 5000);
+                waitTimeMs = Math.max(defaultBackoff, 3000); 
             }
             
-            if (retries > 0) {
-                console.warn(`[Figma] 429 Rate Limit. Retrying in ${waitTimeMs/1000}s...`);
-                await delay(waitTimeMs + 1000, signal); // Add extra buffer
-                // Exponential backoff for next retry
-                return fetchWithRetry(url, headers, signal, retries - 1, waitTimeMs * 2);
-            }
+            console.warn(`[Figma API] 429 Hit. Pausing for ${waitTimeMs/1000}s... (Retries left: ${retries})`);
+            await delay(waitTimeMs, signal);
+            
+            return fetchWithRetry(url, headers, signal, retries - 1, waitTimeMs * 1.5);
         }
+
         return response;
     } catch (error: any) {
         if (error.name === 'AbortError') throw error;
         if (retries > 0) {
-            await delay(defaultBackoff, signal);
-            return fetchWithRetry(url, headers, signal, retries - 1, defaultBackoff * 2);
+            if (error.message.includes("프록시 서버가")) throw error;
+
+            console.warn(`[Figma API] Network/Fetch Error. Retrying... (${retries})`);
+            await delay(2000, signal);
+            return fetchWithRetry(url, headers, signal, retries - 1, defaultBackoff);
         }
         throw error;
     }
@@ -177,7 +195,7 @@ const extractTextFromNode = (node: FigmaNode): string => {
 
 const urlToBase64 = async (url: string, signal?: AbortSignal, retries = 2): Promise<string> => {
     try {
-        const response = await fetchViaProxy(url, {}, signal, true);
+        const response = await fetchViaProxy(url, {}, signal, true); // isImage = true
         if (!response.ok) {
             throw new Error(`Image fetch failed: ${response.status}`);
         }
@@ -192,12 +210,9 @@ const urlToBase64 = async (url: string, signal?: AbortSignal, retries = 2): Prom
         if ((error as any).name === 'AbortError') throw error;
         
         if (retries > 0) {
-            console.warn(`[Figma] Image download failed. Retrying... (${retries} left)`);
             await delay(1000, signal);
             return urlToBase64(url, signal, retries - 1);
         }
-
-        console.error("Image conversion failed finally", error);
         return "";
     }
 };
@@ -213,8 +228,8 @@ export const getFigmaFilePages = async (
     const headers = { 'X-Figma-Token': accessToken };
     const targetUrl = `${FIGMA_API_BASE}/files/${fileKey}?depth=1`;
     
-    const resp = await fetchWithRetry(targetUrl, headers, signal);
-    if (!resp.ok) throw new Error(`Figma 접근 실패: ${resp.status}`);
+    const resp = await fetchWithRetry(targetUrl, headers, signal, 3, 3000);
+    if (!resp.ok) throw new Error(`Figma 접근 실패: ${resp.status} (토큰을 확인해주세요)`);
 
     const data = await resp.json();
     const pages = data.document.children
@@ -225,7 +240,6 @@ export const getFigmaFilePages = async (
     return pages;
 };
 
-// NEW: Fetch eligible layers (Frames, Sections, Groups) for a specific page
 export const getFigmaFrames = async (
     fileUrl: string,
     accessToken: string,
@@ -238,7 +252,7 @@ export const getFigmaFrames = async (
     const headers = { 'X-Figma-Token': accessToken };
     const listUrl = `${FIGMA_API_BASE}/files/${fileKey}/nodes?ids=${pageId}&depth=1`;
     
-    const resp = await fetchWithRetry(listUrl, headers, signal);
+    const resp = await fetchWithRetry(listUrl, headers, signal, 3, 3000);
     if (!resp.ok) throw new Error("레이어 정보를 가져오는데 실패했습니다.");
 
     const data = await resp.json();
@@ -263,7 +277,7 @@ export const processFigmaPage = async (
     pageId: string,
     onProgress: (msg: string) => void,
     signal?: AbortSignal,
-    targetNodeIds?: string[] // Optional: If provided, only process these IDs
+    targetNodeIds?: string[]
 ): Promise<UploadedFile[]> => {
     const fileKey = extractFileKey(fileUrl);
     if (!fileKey) throw new Error("유효하지 않은 Figma URL입니다.");
@@ -272,7 +286,7 @@ export const processFigmaPage = async (
 
     onProgress("구조 분석 중...");
     const listUrl = `${FIGMA_API_BASE}/files/${fileKey}/nodes?ids=${pageId}&depth=1`;
-    const listResp = await fetchWithRetry(listUrl, headers, signal);
+    const listResp = await fetchWithRetry(listUrl, headers, signal, 3, 3000);
     if (!listResp.ok) throw new Error("페이지 정보를 가져오는데 실패했습니다.");
     
     const listData = await listResp.json();
@@ -282,7 +296,6 @@ export const processFigmaPage = async (
     const validTypes = ['FRAME', 'SECTION', 'COMPONENT', 'INSTANCE', 'GROUP', 'TEXT'];
     let targets = pageNode.children.filter((child: any) => validTypes.includes(child.type));
     
-    // Filter by Selected IDs if provided
     if (targetNodeIds && targetNodeIds.length > 0) {
         targets = targets.filter((child: any) => targetNodeIds.includes(child.id));
     }
@@ -290,8 +303,7 @@ export const processFigmaPage = async (
     if (targets.length === 0) throw new Error("선택된 프레임이 없거나 유효하지 않습니다.");
     console.log(`[Figma] Targets found: ${targets.length}`);
 
-    // Conservative Batch Sizes to prevent 429 Errors
-    const TEXT_BATCH_SIZE = 20; 
+    const TEXT_BATCH_SIZE = 15; 
     const IMAGE_BATCH_SIZE = 5;
 
     const textMap: Record<string, string> = {};
@@ -306,7 +318,7 @@ export const processFigmaPage = async (
         onProgress(`텍스트 데이터 가져오는 중... (${i+1}/${frameChunksForText.length})`);
         try {
             const nodesUrl = `${FIGMA_API_BASE}/files/${fileKey}/nodes?ids=${ids}&depth=10`;
-            const resp = await fetchWithRetry(nodesUrl, headers, signal);
+            const resp = await fetchWithRetry(nodesUrl, headers, signal, 3, 3000);
             if (resp.ok) {
                 const data = await resp.json();
                 Object.values(data.nodes).forEach((n: any) => {
@@ -317,8 +329,9 @@ export const processFigmaPage = async (
             }
         } catch (e: any) {
             if (e.name === 'AbortError') throw e;
+            console.warn("[Figma] Text fetch warning:", e.message);
         }
-        await delay(2000, signal); // Increased cooldown from 500ms
+        await delay(2000, signal); 
     }
 
     // 3. Bulk Fetch Image URLs
@@ -338,23 +351,23 @@ export const processFigmaPage = async (
 
         try {
             const imgUrlReq = `${FIGMA_API_BASE}/images/${fileKey}?ids=${renderableIds}&format=jpg&scale=0.5`;
-            const resp = await fetchWithRetry(imgUrlReq, headers, signal);
+            const resp = await fetchWithRetry(imgUrlReq, headers, signal, 3, 3000);
             if (resp.ok) {
                 batchData = await resp.json();
             }
         } catch (e: any) {
             if (e.name === 'AbortError') throw e;
-            console.warn(`[Figma] Image fetch exception.`, e);
+            console.warn(`[Figma] Image URL fetch warning:`, e.message);
         }
 
-        // Retry Logic for missing images (Scale 0.1)
+        // Retry Logic
         const failedIds = targetIds.filter(id => !batchData.images?.[id]);
         if (failedIds.length > 0) {
             onProgress(`대용량 이미지 저화질 재시도 중... (${failedIds.length}개)`);
             try {
                 const retryIds = failedIds.join(',');
                 const retryReq = `${FIGMA_API_BASE}/images/${fileKey}?ids=${retryIds}&format=jpg&scale=0.1`;
-                const retryResp = await fetchWithRetry(retryReq, headers, signal);
+                const retryResp = await fetchWithRetry(retryReq, headers, signal, 3, 3000);
                 if (retryResp.ok) {
                     const retryData = await retryResp.json();
                     if (retryData.images) Object.assign(batchData.images, retryData.images);
@@ -364,7 +377,7 @@ export const processFigmaPage = async (
             }
         }
         if (batchData.images) Object.assign(imageUrlMap, batchData.images);
-        await delay(2000, signal); // Increased cooldown from 1000ms
+        await delay(2000, signal);
     }
 
     // 4. Download & Assemble
@@ -382,7 +395,7 @@ export const processFigmaPage = async (
         let imageAdded = false;
 
         if (imgUrl) {
-            const base64 = await urlToBase64(imgUrl, signal);
+            const base64 = await urlToBase64(imgUrl, signal, 2);
             if (base64) {
                 imageAdded = true;
                 uploadedFiles.push({
@@ -407,11 +420,8 @@ export const processFigmaPage = async (
             }
         } 
         
-        // Fallback: If image failed (or didn't exist), ALWAYS create a file to match Target count.
         if (!imageAdded) {
              const cleanText = txtContent ? txtContent.trim() : "";
-             
-             // Create a placeholder file so the LLM/User knows this screen exists but image failed
              uploadedFiles.push({
                 id: uuidv4(),
                 name: `[Figma_Note] ${target.name}.txt`, 
