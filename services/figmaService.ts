@@ -55,6 +55,13 @@ const delay = (ms: number, signal?: AbortSignal) => {
 
 // --- PROXY STRATEGY ---
 
+// 1. API Call Proxies (Priority: Public -> Private)
+const PROXY_GENERATORS_API = [
+    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // Primary: Public
+    (url: string) => `${FIXED_PROXY_URL.replace(/\/$/, '')}?url=${encodeURIComponent(url)}` // Backup: Private
+];
+
+// 2. Image Call Proxies (Use specialized image CDNs first)
 const PROXY_GENERATORS_IMAGE = [
     (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}`, 
     (url: string) => `https://images.weserv.nl/?url=${encodeURIComponent(url)}`,
@@ -70,12 +77,10 @@ const fetchViaProxy = async (
     let generators: ((url: string) => string)[];
 
     if (!isImage) {
-        // [API CALLS] Use the robust FIXED Custom Worker
-        // Ensure no trailing slash and append query
-        const cleanProxy = FIXED_PROXY_URL.replace(/\/$/, '');
-        generators = [(url) => `${cleanProxy}?url=${encodeURIComponent(url)}`];
+        // [API CALLS] Try Public -> Then Private
+        generators = PROXY_GENERATORS_API;
     } else {
-        // [IMAGE CALLS] Use Image CDNs for performance & bandwidth saving on the worker
+        // [IMAGE CALLS] Use Image CDNs
         generators = PROXY_GENERATORS_IMAGE;
     }
 
@@ -92,13 +97,14 @@ const fetchViaProxy = async (
             
             if (response.status === 404) return response;
 
-            // 429 Logic
+            // 429 Logic (Rate Limit)
             if (response.status === 429) {
-                // If it's the Fixed Proxy (API) or the last Image proxy, return 429 to let retry logic handle it.
-                if (generators.length === 1 || i === generators.length - 1) {
+                // If it's the LAST proxy in the list, we have no choice but to return the 429.
+                // Otherwise, log it and rotate to the next one (e.g., Public failed -> Switch to Private).
+                if (i === generators.length - 1) {
                     return response; 
                 }
-                console.warn(`[Proxy ${i}] Rate Limited. Rotating...`);
+                console.warn(`[Proxy ${i}] Rate Limited (429). Switching to backup proxy...`);
                 continue; 
             }
 
@@ -150,7 +156,7 @@ const fetchWithRetry = async (
                     console.warn(`[Figma] Server requested wait: ${parsedVal}s.`);
                     
                     if (waitTimeMs > 60000) {
-                        throw new Error(`프록시 서버가 과도한 요청으로 차단되었습니다 (대기: ${parsedVal}초). 잠시 후 다시 시도해주세요.`);
+                        throw new Error(`모든 프록시(공용 및 개인)가 차단되었습니다 (대기: ${parsedVal}초). 잠시 후 다시 시도해주세요.`);
                     }
                 }
             } else {
@@ -167,7 +173,7 @@ const fetchWithRetry = async (
     } catch (error: any) {
         if (error.name === 'AbortError') throw error;
         if (retries > 0) {
-            if (error.message.includes("프록시 서버가")) throw error;
+            if (error.message.includes("프록시")) throw error;
 
             console.warn(`[Figma API] Network/Fetch Error. Retrying... (${retries})`);
             await delay(2000, signal);
