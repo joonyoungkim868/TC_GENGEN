@@ -3,8 +3,8 @@ import { UploadedFile } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
 const FIGMA_API_BASE = "https://api.figma.com/v1";
-// Hardcoded Custom Proxy URL provided by user
-const FIXED_PROXY_URL = "https://weathered-rice-71c4.red-smoke-22ef.workers.dev";
+// Hardcoded Custom Proxy URL provided by user (Ensure no trailing slash here for safety)
+const FIXED_PROXY_URL = "https://weathered-rice-71c4.red-smoke-22ef.workers.dev".replace(/\/$/, '');
 
 interface FigmaNode {
     id: string;
@@ -57,15 +57,21 @@ const delay = (ms: number, signal?: AbortSignal) => {
 
 // 1. API Call Proxies (Priority: Public -> Private)
 const PROXY_GENERATORS_API = [
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // Primary: Public
-    (url: string) => `${FIXED_PROXY_URL.replace(/\/$/, '')}?url=${encodeURIComponent(url)}` // Backup: Private
+    { 
+        name: "Public (corsproxy.io)", 
+        gen: (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}` 
+    },
+    { 
+        name: "Private (Workers)", 
+        gen: (url: string) => `${FIXED_PROXY_URL}?url=${encodeURIComponent(url)}` 
+    }
 ];
 
 // 2. Image Call Proxies (Use specialized image CDNs first)
 const PROXY_GENERATORS_IMAGE = [
-    (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}`, 
-    (url: string) => `https://images.weserv.nl/?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    { name: "wsrv.nl", gen: (url: string) => `https://wsrv.nl/?url=${encodeURIComponent(url)}` },
+    { name: "weserv.nl", gen: (url: string) => `https://images.weserv.nl/?url=${encodeURIComponent(url)}` },
+    { name: "corsproxy.io", gen: (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}` },
 ];
 
 const fetchViaProxy = async (
@@ -74,45 +80,59 @@ const fetchViaProxy = async (
     signal?: AbortSignal, 
     isImage: boolean = false
 ): Promise<Response> => {
-    let generators: ((url: string) => string)[];
-
-    if (!isImage) {
-        // [API CALLS] Try Public -> Then Private
-        generators = PROXY_GENERATORS_API;
-    } else {
-        // [IMAGE CALLS] Use Image CDNs
-        generators = PROXY_GENERATORS_IMAGE;
-    }
-
+    
+    // Select Proxy List
+    const generators = isImage ? PROXY_GENERATORS_IMAGE : PROXY_GENERATORS_API;
     let lastError: any;
 
+    // Explicit Loop
     for (let i = 0; i < generators.length; i++) {
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         
-        const generateUrl = generators[i];
-        const proxyUrl = generateUrl(targetUrl);
+        const currentProxy = generators[i];
+        const proxyUrl = currentProxy.gen(targetUrl);
+        
+        // Cache Busting: Add timestamp to prevent browser caching of 429 responses
+        // This ensures each proxy attempt is a fresh network request
+        const separator = proxyUrl.includes('?') ? '&' : '?';
+        const urlWithCacheBuster = `${proxyUrl}${separator}_t=${Date.now()}`;
+        
+        if (!isImage) {
+            console.log(`[Figma Proxy] 시도 ${i + 1}/${generators.length}: ${currentProxy.name}`);
+        }
         
         try {
-            const response = await fetch(proxyUrl, { headers, signal });
+            // STRICTLY NEW REQUEST
+            const response = await fetch(urlWithCacheBuster, { headers, signal });
             
+            // 404 is a valid response (Resource not found)
             if (response.status === 404) return response;
 
             // 429 Logic (Rate Limit)
             if (response.status === 429) {
-                // If it's the LAST proxy in the list, we have no choice but to return the 429.
-                // Otherwise, log it and rotate to the next one (e.g., Public failed -> Switch to Private).
+                const retryVal = response.headers.get('Retry-After');
+                console.warn(`[Figma Proxy] ${currentProxy.name} returned 429. Retry-After: ${retryVal}`);
+
+                // If this is the LAST proxy in the list, return the 429 response
                 if (i === generators.length - 1) {
+                    console.warn(`[Figma Proxy] 마지막 프록시(${currentProxy.name})까지 차단됨.`);
                     return response; 
                 }
-                console.warn(`[Proxy ${i}] Rate Limited (429). Switching to backup proxy...`);
+
+                // If not the last one, LOG and CONTINUE
+                console.warn(`[Figma Proxy] ${currentProxy.name} 차단됨. 다음 프록시로 전환합니다...`);
+                await delay(500, signal);
                 continue; 
             }
 
-            if (response.ok) return response;
+            if (response.ok) {
+                if (!isImage) console.log(`[Figma Proxy] ${currentProxy.name} 성공!`);
+                return response;
+            }
             
-            // Server Error -> Rotate
+            // Server Error (5xx) -> Rotate
             if (response.status >= 500) {
-                 console.warn(`[Proxy ${i}] Server Error ${response.status}. Rotating...`);
+                 console.warn(`[Figma Proxy] ${currentProxy.name} 서버 오류(${response.status}). 다음 프록시 시도...`);
                  continue;
             }
             
@@ -120,14 +140,14 @@ const fetchViaProxy = async (
 
         } catch (error: any) {
             if (error.name === 'AbortError') throw error;
-            console.warn(`[Proxy ${i}] Network Error: ${error.message}. Rotating...`);
+            console.warn(`[Figma Proxy] ${currentProxy.name} 네트워크 오류: ${error.message}`);
             lastError = error;
         }
 
         if (i < generators.length - 1) await delay(500, signal);
     }
     
-    throw lastError || new Error("All proxies failed to fetch.");
+    throw lastError || new Error("모든 프록시 연결에 실패했습니다.");
 };
 
 // --- END PROXY LOGIC ---
@@ -144,7 +164,7 @@ const fetchWithRetry = async (
         const response = await fetchViaProxy(url, headers, signal, false);
         
         if (response.status === 429) {
-            if (retries <= 0) throw new Error("API Rate Limit Exceeded (Max Retries Reached)");
+            if (retries <= 0) throw new Error("API 요청 한도 초과 (모든 재시도 실패)");
 
             const retryAfterHeader = response.headers.get('Retry-After');
             let waitTimeMs = defaultBackoff;
@@ -153,17 +173,20 @@ const fetchWithRetry = async (
                 const parsedVal = parseInt(retryAfterHeader, 10);
                 if (!isNaN(parsedVal)) {
                     waitTimeMs = parsedVal * 1000;
-                    console.warn(`[Figma] Server requested wait: ${parsedVal}s.`);
                     
+                    // If wait time is > 60s, it is definitely a Token Ban, not a transient error.
                     if (waitTimeMs > 60000) {
-                        throw new Error(`모든 프록시(공용 및 개인)가 차단되었습니다 (대기: ${parsedVal}초). 잠시 후 다시 시도해주세요.`);
+                        const mins = Math.ceil(parsedVal / 60);
+                        const hours = (parsedVal / 3600).toFixed(1);
+                        throw new Error(`⛔ Figma Access Token 차단됨 (Rate Limit)\n\nFigma API가 현재 토큰의 요청을 거부하고 있습니다.\n대기 시간: ${parsedVal}초 (약 ${hours}시간)\n\n[해결책]\n1. 다른 계정의 Access Token을 발급받아 시도하세요.\n2. 지정된 시간이 지난 후 다시 시도하세요.`);
                     }
+                    console.warn(`[Figma API] 잠시 대기 요청 받음: ${parsedVal}초`);
                 }
             } else {
                 waitTimeMs = Math.max(defaultBackoff, 3000); 
             }
             
-            console.warn(`[Figma API] 429 Hit. Pausing for ${waitTimeMs/1000}s... (Retries left: ${retries})`);
+            console.warn(`[Figma API] 429 발생. ${waitTimeMs/1000}초 후 재시도... (남은 횟수: ${retries})`);
             await delay(waitTimeMs, signal);
             
             return fetchWithRetry(url, headers, signal, retries - 1, waitTimeMs * 1.5);
@@ -172,10 +195,11 @@ const fetchWithRetry = async (
         return response;
     } catch (error: any) {
         if (error.name === 'AbortError') throw error;
-        if (retries > 0) {
-            if (error.message.includes("프록시")) throw error;
+        // Do not retry if it's the specific "Token Ban" error
+        if (error.message.includes("Figma Access Token 차단됨")) throw error;
 
-            console.warn(`[Figma API] Network/Fetch Error. Retrying... (${retries})`);
+        if (retries > 0) {
+            console.warn(`[Figma API] 오류 발생. 재시도 중... (${retries})`);
             await delay(2000, signal);
             return fetchWithRetry(url, headers, signal, retries - 1, defaultBackoff);
         }
@@ -309,8 +333,9 @@ export const processFigmaPage = async (
     if (targets.length === 0) throw new Error("선택된 프레임이 없거나 유효하지 않습니다.");
     console.log(`[Figma] Targets found: ${targets.length}`);
 
-    const TEXT_BATCH_SIZE = 15; 
-    const IMAGE_BATCH_SIZE = 5;
+    // CONFIGURATION: Safe limits to avoid 429 bans
+    const TEXT_BATCH_SIZE = 10; 
+    const IMAGE_BATCH_SIZE = 2; // Significantly reduced from 5 to 2 for safety
 
     const textMap: Record<string, string> = {};
     const imageUrlMap: Record<string, string> = {};
@@ -337,7 +362,8 @@ export const processFigmaPage = async (
             if (e.name === 'AbortError') throw e;
             console.warn("[Figma] Text fetch warning:", e.message);
         }
-        await delay(2000, signal); 
+        // Random jitter delay between 2s and 4s
+        await delay(2000 + Math.random() * 2000, signal); 
     }
 
     // 3. Bulk Fetch Image URLs
@@ -383,7 +409,10 @@ export const processFigmaPage = async (
             }
         }
         if (batchData.images) Object.assign(imageUrlMap, batchData.images);
-        await delay(2000, signal);
+        
+        // Extended delay for images: 4s to 6s + Random jitter
+        // This is crucial to avoid "Abuse" detection for image generation
+        await delay(4000 + Math.random() * 2000, signal);
     }
 
     // 4. Download & Assemble
