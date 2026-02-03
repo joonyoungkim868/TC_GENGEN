@@ -21,21 +21,21 @@ const testCaseSchema: Schema = {
                 type: Type.OBJECT,
                 properties: {
                     no: { type: Type.NUMBER },
-                    title: { type: Type.STRING, description: "Test Case Title (in Korean)" },
+                    title: { type: Type.STRING, description: "Test Case Title (in Korean). Must be specific." },
                     depth1: { type: Type.STRING },
                     depth2: { type: Type.STRING },
                     depth3: { type: Type.STRING },
                     precondition: { 
                         type: Type.STRING, 
-                        description: "List of states required BEFORE the test starts. MUST be a numbered list (1. State A\\n2. State B). Do NOT say 'None'." 
+                        description: "Specific Data State required. Must utilize numbered list (1. State A\\n2. State B). Do NOT use generic terms like 'Access page'." 
                     },
                     steps: { 
                         type: Type.STRING, 
-                        description: "Detailed execution path. Start with Navigation path. Specify Input Data. Use numbered list. End with Noun (명사형). DO NOT end with a period." 
+                        description: "Detailed execution path with CONCRETE DATA. Use specific dates, numbers, or strings (e.g., '2024-01-01'). End with Noun (명사형). DO NOT end with a period." 
                     },
                     expectedResult: { 
                         type: Type.STRING, 
-                        description: "Final UI outcome. ONE atomic check only. Use Passive Voice (~된다). Do NOT say 'Check'." 
+                        description: "Exact UI text or System State change. Use Passive Voice (~된다). Include error message content if applicable." 
                     },
                 },
                 required: ["no", "title", "steps", "expectedResult"] // Enforce required fields
@@ -312,55 +312,49 @@ export const generateTestCases = async (
   
   const PHASES = [
       { 
-          name: "1. Visual Inspector (UI/UX)", 
-          mode: "STANDARD", // Run once
+          name: "1. Data Integrity & Validation", 
+          mode: "STANDARD", 
           prompt: `
-            **GOAL**: Detect visual anomalies.
-            - Scan for **Typos** in labels and guide texts.
-            - Verify **Placeholders** are present in empty fields.
-            - Check alignment of input boxes and buttons.
-            - Verify Icons match their labels.
+            **GOAL**: Verify field-level constraints and formats.
+            - **Required Fields**: Test empty submission.
+            - **Data Types**: Test numeric fields with text, special chars.
+            - **Limits**: Test max length (e.g., 5000 chars) and min length.
+            - **Format**: Test email, phone number, currency format.
+            - **Default Values**: Check if initial values are correct.
           `
       },
       { 
-          name: "2. Flow Navigator (Transitions)", 
-          mode: "DEEP_DIVE", // Run Draft -> Audit -> Expand
+          name: "2. Business Logic & Interdependency", 
+          mode: "DEEP_DIVE", 
           prompt: `
-            **GOAL**: Verify screen transitions.
-            - Do not just check the current screen. Check where the [Button] takes you.
-            - TC Structure: Step [Click Button] -> Expected [New Page Opens].
-            - Verify Breadcrumbs or Header Titles update correctly after transition.
+            **GOAL**: Verify relationships between fields and data logic.
+            - **Date Logic**: Test Start Date > End Date. Test Past Dates.
+            - **Cross-Field Logic**: If 'Category A' is selected, does 'Sub-category B' appear?
+            - **Calculations**: If Quantity=2 and Price=1000, is Total=2000?
+            - **Status Logic**: Can 'Sold Out' item be purchased?
+            - **Use Concrete Data**: Example: "Select 'Electronics' -> Verify 'Laptop' appears".
           `
       },
       { 
-          name: "3. Field Iterator (Input Validation)", 
-          mode: "DEEP_DIVE", // Run Draft -> Audit -> Expand
+          name: "3. Workflow & State Lifecycle", 
+          mode: "DEEP_DIVE", 
           prompt: `
-            **GOAL**: Exhaustive Input Testing (De-bundling).
-            - **LOOP**: For EVERY input field found (A, B, C...):
-              1. Generate TC: [Field A] - Empty value.
-              2. Generate TC: [Field A] - Invalid format (Special chars, etc).
-              3. Generate TC: [Field A] - Max length exceeded.
-            - **WARNING**: Do NOT group fields. "Check all inputs" is FORBIDDEN.
+            **GOAL**: Verify system state changes and flow completion.
+            - **CRUD**: Create -> Read -> Update -> Delete.
+            - **State Change**: Change status 'Draft' -> 'Published'. Verify visibility in User App.
+            - **Persistence**: Save -> Refresh page -> Verify data remains.
+            - **Side Effects**: If I modify this setting, does it affect the main dashboard?
           `
       },
       { 
-          name: "4. Logic Calculator (State & Arithmetic)", 
-          mode: "DEEP_DIVE", // Run Draft -> Audit -> Expand
+          name: "4. Edge Cases & Resilience", 
+          mode: "DEEP_DIVE", 
           prompt: `
-            **GOAL**: Verify numeric changes and state updates.
-            - **FORMULA**: If a list item is added/removed, use formula: **[Before: N] -> [After: N+1]** or **[N-1]**.
-            - Explicitly mention the calculation in Expected Result. (e.g., "Count increases from 0 to 1").
-            - Verify Pagination (Page 1 -> Page 2).
-          `
-      },
-      { 
-          name: "5. Context-Based Stability (Retention)", 
-          mode: "STANDARD",
-          prompt: `
-            **GOAL**: Verify data persistence and safe failures.
-            - Test **Browser Refresh (F5)**: Does the form data survive?
-            - Test **Back Button**: Can user return to previous state safely?
+            **GOAL**: Verify system stability under abnormal conditions.
+            - **Boundary Values**: Max-1, Max, Max+1.
+            - **Negative Flow**: Cancel midway, Back button during loading.
+            - **Duplication**: Try to create duplicate IDs/Names.
+            - **Rapid Action**: Double click [Save] button.
           `
       }
   ];
@@ -408,9 +402,9 @@ export const generateTestCases = async (
       **TASK**: Generate an exhaustive list of Test Cases for this phase.
       
       **STRATEGY**:
-      1. Iterate through EVERY visible element.
-      2. Apply Truth Table (Valid/Invalid/Empty).
-      3. Do NOT stop until all elements are covered.
+      1. Analyze the provided Context/Files deeply.
+      2. Apply **Boundary Value Analysis** (Min/Max).
+      3. Use **Concrete Examples** (e.g., '2024-01-01', 'Price: -100').
       
       PHASE INSTRUCTION:
       ${currentPhase.prompt}
@@ -444,21 +438,18 @@ export const generateTestCases = async (
               You are now the **Lead Auditor**.
               Review the "Draft Test Cases" provided below against the visual document.
 
-              **TASK A: FACT CHECK (Quality Control)**
-              - **Verify Existence**: Does the element mentioned in the TC *actually exist* in the image/text? 
-                - If NO, discard it.
-                - If text labels (Button names) are wrong, correct them.
-              - **Verify Logic**: Is the expected result realistic based on the provided UI?
+              **TASK A: FACT CHECK (Specific Data)**
+              - Are the "Concrete Examples" used in Steps realistic?
+              - Are the Expected Results descriptive enough (Passive Voice, Exact Text)?
+              - If steps are vague (e.g., "Enter date"), REWRITE them to be specific (e.g., "Enter '2025-12-31'").
 
-              **TASK B: GAP ANALYSIS (Quantity Expansion)**
-              - Look for "Blind Spots" that the Draft missed.
-              - Are there other buttons, links, or inputs in the image that were ignored?
-              - Are there negative cases (Error handling) missing?
+              **TASK B: LOGIC CHECK (Business Rules)**
+              - Did we miss any "Interdependency" (A affects B)?
+              - Did we miss "Negative Cases" (Error handling)?
               
               **FINAL OUTPUT**:
-              - Regenerate the **FULL, CLEAN LIST**.
-              - Include the valid/corrected TCs from the Draft.
-              - Appending NEW TCs for the missing gaps found in Task B.
+              - Regenerate the **FULL, IMPROVED LIST**.
+              - Discard vague TCs. Keep only high-quality TCs.
               - Start numbering from ${currentStartNo}.
 
               DRAFT TEST CASES (For Review):
@@ -551,11 +542,9 @@ export const updateTestCasesWithQA = async (
     Update based on the Q&A provided.
     
     CRITICAL RULES:
-    1. Maintain the "Visual Permutation" rule.
-    2. Maintain the "Atomic Rule" (One Result per TC).
-    3. **Preconditions**: MUST be a numbered list (1. ... \n2. ...).
-    4. **Steps**: End sentences with NOUNS (명사형) or IMPERATIVE. **DO NOT end with a period(.).**
-    5. **Results**: Use PASSIVE VOICE (~된다).
+    1. **Preconditions**: MUST be a numbered list (1. ... \n2. ...).
+    2. **Steps**: Use CONCRETE DATA (e.g., "Enter '2024-01-01'"). End sentences with NOUNS.
+    3. **Results**: Use PASSIVE VOICE (~된다). Specify EXACT Error Messages if applicable.
     
     Output ONLY valid JSON.
     Values MUST be in Korean.
