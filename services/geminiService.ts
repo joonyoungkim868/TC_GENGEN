@@ -27,11 +27,11 @@ const testCaseSchema: Schema = {
                     depth3: { type: Type.STRING },
                     precondition: { 
                         type: Type.STRING, 
-                        description: "Specific Data State required. Must utilize numbered list (1. State A\\n2. State B). Do NOT use generic terms like 'Access page'." 
+                        description: "Specific Data State required. Must utilize numbered list (1. State A\\n2. State B)." 
                     },
                     steps: { 
                         type: Type.STRING, 
-                        description: "Detailed execution path with CONCRETE DATA. Use specific dates, numbers, or strings (e.g., '2024-01-01'). End with Noun (명사형). DO NOT end with a period." 
+                        description: "Detailed execution path with CONCRETE DATA. Use specific dates, numbers, or strings (e.g., '2024-01-01'). End with Noun (명사형)." 
                     },
                     expectedResult: { 
                         type: Type.STRING, 
@@ -45,12 +45,16 @@ const testCaseSchema: Schema = {
             type: Type.ARRAY,
             items: { type: Type.STRING }
         },
-        summary: { type: Type.STRING }
+        summary: { type: Type.STRING },
+        hasMore: { 
+            type: Type.BOOLEAN, 
+            description: "Set to TRUE if there are more possible test cases for this phase that haven't been generated yet. Set to FALSE only if exhaustive." 
+        }
     }
 };
 
 // 1. Bracket-based parser (Standard approach)
-const parseViaBrackets = (text: string, result: { testCases: any[], questions: string[], summary: string }) => {
+const parseViaBrackets = (text: string, result: { testCases: any[], questions: string[], summary: string, hasMore: boolean }) => {
   let startIndex = 0;
   let maxIterations = 10000; 
   
@@ -90,6 +94,7 @@ const parseViaBrackets = (text: string, result: { testCases: any[], questions: s
                               });
                               if (obj.questions) result.questions = obj.questions;
                               if (obj.summary) result.summary = obj.summary;
+                              if (obj.hasMore !== undefined) result.hasMore = obj.hasMore;
                           }
                       } catch (e) {}
                       foundEnd = true;
@@ -136,11 +141,12 @@ const parseViaRegex = (text: string, result: { testCases: any[] }) => {
   }
 };
 
-const recoverTruncatedJson = (text: string): { testCases: any[], questions: string[], summary: string } => {
+const recoverTruncatedJson = (text: string): { testCases: any[], questions: string[], summary: string, hasMore: boolean } => {
   const result = {
     testCases: [] as any[],
     questions: [] as string[],
-    summary: ""
+    summary: "",
+    hasMore: false
   };
   const cleanText = text.replace(/```json/g, '').replace(/```/g, '');
 
@@ -249,7 +255,7 @@ const callGeminiWithRetry = async (
             const config: any = {
                 systemInstruction: baseSystemInstruction,
                 maxOutputTokens: 65536,
-                temperature: 0.2, // Lower temperature for more analytical/strict results
+                temperature: 0.3, // Slightly higher for creativity in variation, but strictly controlled by schema
                 responseMimeType: "application/json",
             };
 
@@ -282,10 +288,11 @@ const callGeminiWithRetry = async (
 };
 
 // Helper to handle parsing and mapping from Gemini response
-const parseResponse = (responseText: string): { tcs: TestCase[], qs: string[], summary: string } => {
+const parseResponse = (responseText: string): { tcs: TestCase[], qs: string[], summary: string, hasMore: boolean } => {
     let tcs: TestCase[] = [];
     let qs: string[] = [];
     let summary = "";
+    let hasMore = false;
 
     const cleanText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
     try {
@@ -294,14 +301,16 @@ const parseResponse = (responseText: string): { tcs: TestCase[], qs: string[], s
         tcs = mapToTestCases(rawTcs);
         qs = json.questions || [];
         summary = json.summary || "";
+        hasMore = json.hasMore === true;
     } catch (e) {
         console.warn("JSON Parse failed, attempting recovery...");
         const recovered = recoverTruncatedJson(responseText);
         tcs = mapToTestCases(recovered.testCases);
         qs = recovered.questions;
         summary = recovered.summary;
+        hasMore = recovered.hasMore;
     }
-    return { tcs, qs, summary };
+    return { tcs, qs, summary, hasMore };
 };
 
 export const generateTestCases = async (
@@ -313,48 +322,41 @@ export const generateTestCases = async (
   const PHASES = [
       { 
           name: "1. Data Integrity & Validation", 
-          mode: "STANDARD", 
           prompt: `
-            **GOAL**: Verify field-level constraints and formats.
-            - **Required Fields**: Test empty submission.
-            - **Data Types**: Test numeric fields with text, special chars.
-            - **Limits**: Test max length (e.g., 5000 chars) and min length.
-            - **Format**: Test email, phone number, currency format.
-            - **Default Values**: Check if initial values are correct.
+            **GOAL**: Verify field-level constraints using **Variation Matrix**.
+            
+            For EVERY input field identified, generate 4 types of cases:
+            1. **Valid Data**: Standard, correct input.
+            2. **Invalid Data**: Wrong format, special characters, type mismatch.
+            3. **Boundary Values**: Min, Max, Min-1, Max+1.
+            4. **Empty/Null**: Submit without mandatory fields.
+            
+            Do NOT group them. Create separate Test Cases for each variation.
           `
       },
       { 
           name: "2. Business Logic & Interdependency", 
-          mode: "DEEP_DIVE", 
           prompt: `
-            **GOAL**: Verify relationships between fields and data logic.
-            - **Date Logic**: Test Start Date > End Date. Test Past Dates.
-            - **Cross-Field Logic**: If 'Category A' is selected, does 'Sub-category B' appear?
-            - **Calculations**: If Quantity=2 and Price=1000, is Total=2000?
-            - **Status Logic**: Can 'Sold Out' item be purchased?
-            - **Use Concrete Data**: Example: "Select 'Electronics' -> Verify 'Laptop' appears".
+            **GOAL**: Verify relationships between fields.
+            
+            **CRITICAL**: You must find cases where "Field A affects Field B".
+            - Date Logic: Start > End, Same Day, Leap Year.
+            - Calculations: Price * Qty = Total.
+            - Status Logic: 'Sold Out' items cannot be carted.
+            - Permissions: User vs Admin view differences.
+            
+            Use **Concrete Data** (e.g., "Select 'Electronics' -> 'Laptop' appears").
           `
       },
       { 
-          name: "3. Workflow & State Lifecycle", 
-          mode: "DEEP_DIVE", 
+          name: "3. Workflow, States & Edge Cases", 
           prompt: `
-            **GOAL**: Verify system state changes and flow completion.
-            - **CRUD**: Create -> Read -> Update -> Delete.
-            - **State Change**: Change status 'Draft' -> 'Published'. Verify visibility in User App.
-            - **Persistence**: Save -> Refresh page -> Verify data remains.
-            - **Side Effects**: If I modify this setting, does it affect the main dashboard?
-          `
-      },
-      { 
-          name: "4. Edge Cases & Resilience", 
-          mode: "DEEP_DIVE", 
-          prompt: `
-            **GOAL**: Verify system stability under abnormal conditions.
-            - **Boundary Values**: Max-1, Max, Max+1.
-            - **Negative Flow**: Cancel midway, Back button during loading.
-            - **Duplication**: Try to create duplicate IDs/Names.
-            - **Rapid Action**: Double click [Save] button.
+            **GOAL**: Verify lifecycle and abnormal flows.
+            
+            - **Lifecycle**: Create -> Read -> Update -> Delete (CRUD).
+            - **State Change**: Draft -> Published -> Archived.
+            - **Negative Flow**: Back button during loading, Network interrupt.
+            - **Double Action**: Click [Save] twice rapidly.
           `
       }
   ];
@@ -389,102 +391,134 @@ export const generateTestCases = async (
   // Loop through each Phase
   for (let i = 0; i < PHASES.length; i++) {
       const currentPhase = PHASES[i];
-      console.log(`[Gemini Loop] Starting ${currentPhase.name} (Mode: ${currentPhase.mode})`);
+      console.log(`[Gemini Loop] Starting ${currentPhase.name}`);
 
       // ---------------------------------------------------------
-      // STEP 1: DRAFT (Create initial list)
+      // STEP 1: EXPANSION LOOP (Quantity Generation)
       // ---------------------------------------------------------
-      const draftPrompt = `
-      --- COMMAND: STEP 1 (DRAFT) ---
-      CURRENT PHASE: ${currentPhase.name}
-      START_NO: ${currentStartNo}
-      
-      **TASK**: Generate an exhaustive list of Test Cases for this phase.
-      
-      **STRATEGY**:
-      1. Analyze the provided Context/Files deeply.
-      2. Apply **Boundary Value Analysis** (Min/Max).
-      3. Use **Concrete Examples** (e.g., '2024-01-01', 'Price: -100').
-      
-      PHASE INSTRUCTION:
-      ${currentPhase.prompt}
-      
-      Output ONLY valid JSON.
-      --- END COMMAND ---
-      `;
-
-      let phaseTCs: TestCase[] = [];
+      let phaseDraftTCs: TestCase[] = [];
       let phaseQs: string[] = [];
+      let hasMore = true;
+      let pageCount = 0;
+      const MAX_PAGES = 3; // Safety limit to prevent infinite loops (approx 30-45 TCs per phase)
 
-      try {
-          const draftResponse = await callGeminiWithRetry(ai, [...baseParts, { text: draftPrompt }], baseSystemInstruction, true);
-          const parsed = parseResponse(draftResponse);
-          phaseTCs = parsed.tcs;
-          phaseQs = parsed.qs;
-          if (parsed.summary) finalSummary += ` [${currentPhase.name}] ${parsed.summary}`;
+      while (hasMore && pageCount < MAX_PAGES) {
+          pageCount++;
+          console.log(`   -> Expansion Page ${pageCount} for ${currentPhase.name}`);
 
-          // ---------------------------------------------------------
-          // STEP 2 & 3: AUDIT & EXPAND (Only for DEEP_DIVE phases)
-          // ---------------------------------------------------------
-          if (currentPhase.mode === "DEEP_DIVE" && phaseTCs.length > 0) {
+          const previousTitles = phaseDraftTCs.map(tc => tc.title).join(", ");
+          
+          const expansionPrompt = `
+          --- COMMAND: STEP 1 (EXPANSION) ---
+          CURRENT PHASE: ${currentPhase.name}
+          PAGE: ${pageCount}
+          
+          **TASK**: Generate Test Cases using the strategies below.
+          
+          **STRATEGY**:
+          ${currentPhase.prompt}
+          
+          **PAGINATION RULE**:
+          - If you can think of MORE cases that are NOT in the list below, set "hasMore": true.
+          - If you have exhausted ALL possibilities for this phase, set "hasMore": false.
+          
+          **ALREADY GENERATED (DO NOT DUPLICATE)**:
+          ${previousTitles.substring(0, 1000)}...
+
+          Output JSON.
+          --- END COMMAND ---
+          `;
+
+          try {
+              const response = await callGeminiWithRetry(ai, [...baseParts, { text: expansionPrompt }], baseSystemInstruction, true);
+              const parsed = parseResponse(response);
               
-              // We minimize the draft list to save tokens, sending only key fields for review
-              const draftSummary = JSON.stringify(phaseTCs.map(tc => ({ no: tc.no, title: tc.title, steps: tc.steps, expected: tc.expectedResult })));
-
-              const auditPrompt = `
-              --- COMMAND: STEP 2 (AUDIT & EXPAND) ---
-              CURRENT PHASE: ${currentPhase.name}
-              
-              You are now the **Lead Auditor**.
-              Review the "Draft Test Cases" provided below against the visual document.
-
-              **TASK A: FACT CHECK (Specific Data)**
-              - Are the "Concrete Examples" used in Steps realistic?
-              - Are the Expected Results descriptive enough (Passive Voice, Exact Text)?
-              - If steps are vague (e.g., "Enter date"), REWRITE them to be specific (e.g., "Enter '2025-12-31'").
-
-              **TASK B: LOGIC CHECK (Business Rules)**
-              - Did we miss any "Interdependency" (A affects B)?
-              - Did we miss "Negative Cases" (Error handling)?
-              
-              **FINAL OUTPUT**:
-              - Regenerate the **FULL, IMPROVED LIST**.
-              - Discard vague TCs. Keep only high-quality TCs.
-              - Start numbering from ${currentStartNo}.
-
-              DRAFT TEST CASES (For Review):
-              ${draftSummary}
-
-              Output ONLY valid JSON.
-              --- END COMMAND ---
-              `;
-
-              console.log(`[Gemini Loop] Deep Dive Audit for ${currentPhase.name}...`);
-              const auditResponse = await callGeminiWithRetry(ai, [...baseParts, { text: auditPrompt }], baseSystemInstruction, true);
-              const audited = parseResponse(auditResponse);
-              
-              // If audit returns results, trust the Auditor. If it fails/returns empty, fallback to Draft.
-              if (audited.tcs.length > 0) {
-                  console.log(`[Gemini Loop] Audit complete. TC Count: ${phaseTCs.length} -> ${audited.tcs.length}`);
-                  phaseTCs = audited.tcs; // Replace draft with audited version
-                  phaseQs = [...phaseQs, ...audited.qs]; // Accumulate questions
-              } else {
-                  console.warn(`[Gemini Loop] Audit returned 0 TCs. Reverting to Draft.`);
+              if (parsed.tcs.length > 0) {
+                  phaseDraftTCs = [...phaseDraftTCs, ...parsed.tcs];
+                  phaseQs = [...phaseQs, ...parsed.qs];
               }
-          }
+              
+              hasMore = parsed.hasMore;
+              if (parsed.tcs.length === 0) hasMore = false; // Stop if AI returns nothing
 
-          // Normalize and Append
-          phaseTCs = normalizeTestCases(phaseTCs);
-          if (phaseTCs.length > 0) {
-               accumulatedTestCases = [...accumulatedTestCases, ...phaseTCs];
-               accumulatedQuestions = [...accumulatedQuestions, ...phaseQs];
-               
-               const lastTC = phaseTCs[phaseTCs.length - 1];
-               currentStartNo = (lastTC?.no || currentStartNo) + 1;
+          } catch (e) {
+              console.error(`Error in Expansion Page ${pageCount}:`, e);
+              hasMore = false;
           }
+      }
 
-      } catch (error) {
-          console.error(`Error in loop ${currentPhase.name}:`, error);
+      console.log(`   -> Draft Generated: ${phaseDraftTCs.length} TCs. Starting Verification...`);
+
+      // ---------------------------------------------------------
+      // STEP 2: STRICT VERIFICATION (Hallucination Pruning)
+      // ---------------------------------------------------------
+      if (phaseDraftTCs.length > 0) {
+          
+          // We send the titles and steps to the "Judge"
+          const draftSummary = JSON.stringify(phaseDraftTCs.map(tc => ({ 
+              id: tc.id, // Keep ID to map back
+              title: tc.title, 
+              steps: tc.steps,
+              expected: tc.expectedResult 
+          })));
+
+          const verificationPrompt = `
+          --- COMMAND: STEP 2 (VERIFICATION JUDGE) ---
+          
+          You are the **Verification Judge**.
+          Below is a list of DRAFT Test Cases generated by a junior engineer.
+          
+          **TASK**:
+          1. Cross-reference EACH Test Case with the provided files (Images/Text).
+          2. **EVIDENCE CHECK**: Can you find the button, field, or logic described in the source files?
+          3. **ACTION**:
+             - If VALID (Evidence found): Keep it.
+             - If HALLUCINATION (No evidence found): **DELETE IT**. Do not fix it, just drop it.
+          
+          **OUTPUT**:
+          - Return the filtered list of Test Cases.
+          - Use the exact same format as input.
+          - **Discard** any TC that invents features not in the documents.
+
+          DRAFT LIST TO VERIFY:
+          ${draftSummary}
+
+          Output ONLY valid JSON.
+          --- END COMMAND ---
+          `;
+
+          try {
+              const verifyResponse = await callGeminiWithRetry(ai, [...baseParts, { text: verificationPrompt }], baseSystemInstruction, true);
+              const verifiedParsed = parseResponse(verifyResponse);
+              
+              const verifiedTCs = verifiedParsed.tcs;
+              console.log(`   -> Verification Complete. Dropped ${phaseDraftTCs.length - verifiedTCs.length} hallucinations.`);
+
+              // Normalize and Add to Accumulator
+              const normalized = normalizeTestCases(verifiedTCs);
+              
+              // Renumbering for this batch to ensure continuity
+              const renumbered = normalized.map((tc, idx) => ({
+                  ...tc,
+                  no: currentStartNo + idx
+              }));
+              
+              if (renumbered.length > 0) {
+                  accumulatedTestCases = [...accumulatedTestCases, ...renumbered];
+                  accumulatedQuestions = [...accumulatedQuestions, ...phaseQs]; // Keep original questions
+                  currentStartNo += renumbered.length;
+                  finalSummary += ` [${currentPhase.name}] Generated ${renumbered.length} valid cases.`;
+              }
+
+          } catch (e) {
+              console.error("Verification failed, falling back to draft (risky but better than empty):", e);
+              // Fallback: If verification crashes, use the draft but mark them? Or just use draft.
+              // For now, we normalize the draft and use it to avoid data loss.
+              const normalized = normalizeTestCases(phaseDraftTCs);
+              const renumbered = normalized.map((tc, idx) => ({ ...tc, no: currentStartNo + idx }));
+              accumulatedTestCases = [...accumulatedTestCases, ...renumbered];
+              currentStartNo += renumbered.length;
+          }
       }
   }
 
